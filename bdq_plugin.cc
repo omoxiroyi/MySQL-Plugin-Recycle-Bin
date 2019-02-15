@@ -19,14 +19,26 @@
 #include "bdq_slave.h"
 #include <mysql.h>
 #include <mysqld_error.h>
+#include <sql_thd_internal_api.h>
+#include <auth/sql_acl.h>
+#include <sql_tablespace.h>
+#include <sql_base.h>
 #include "log_event.h"
 #include "sql_parse.h"
+#include "conn_handler/channel_info.h"
+#include "sql_rename.h"
+#include "sql_db.h"
+#include "sql_table.h"
 
 bdqSlave bdq_slave;
 static Format_description_log_event*  glob_description_event = NULL;
 static my_bool opt_verify_binlog_checksum= TRUE;
 static my_bool received_fde = FALSE;
-static THD* bdq_backup_thd = new THD;
+static THD* bdq_backup_thd = NULL;
+static Channel_info* channel_info= NULL;
+static char query_create_table[]="CREATE TABLE  (id int not null auto_increment primary key)ENGINE=INNODB";
+static const char query_create_backup_database[] = "create database if not exists recycle_bin_bdq";
+
 
 /*
   indicate whether or not the slave should send a reply to the master.
@@ -36,6 +48,252 @@ static THD* bdq_backup_thd = new THD;
   checked in repl_semi_slave_queue_event.
 */
 bool semi_sync_need_reply= false;
+
+my_bool bdq_prepare_execute_command(THD* bdq_backup_thd,const char* query,const char* db,const char* table_name)
+{
+
+  Parser_state parser_state;
+  struct st_mysql_const_lex_string new_db;
+  new_db.str=db;
+  new_db.length = strlen(db);
+  bdq_backup_thd->reset_db(new_db);
+  alloc_query(bdq_backup_thd, query,strlen(query));
+
+  if(parser_state.init(bdq_backup_thd, bdq_backup_thd->query().str, bdq_backup_thd->query().length))
+  {
+    return FALSE;
+  }
+  mysql_reset_thd_for_next_command(bdq_backup_thd);
+  lex_start(bdq_backup_thd);
+  bdq_backup_thd->m_parser_state= &parser_state;
+  //invoke_pre_parse_rewrite_plugins(bdq_backup_thd);
+  bdq_backup_thd->m_parser_state= NULL;
+  //LEX* lex= bdq_backup_thd->lex;
+  bool err= bdq_backup_thd->get_stmt_da()->is_error();
+
+  err=parse_sql(bdq_backup_thd, &parser_state, NULL);
+
+  return !err;
+}
+
+void bdq_after_execute_command(THD* bdq_backup_thd)
+{
+  bdq_backup_thd->mdl_context.release_statement_locks();
+  bdq_backup_thd->mdl_context.release_transactional_locks();
+  bdq_backup_thd->lex->unit->cleanup(true);
+  close_thread_tables(bdq_backup_thd);
+  bdq_backup_thd->end_statement();
+  bdq_backup_thd->cleanup_after_query();
+}
+
+
+/**
+ * 在遇到表删除时，选择将被删除的表rename为指定库下的表，再新建表，用于sql线程进行真正的删除。
+ * @param table_dropped_name
+ * @param db
+ * @param backup_dir
+ * @param bdq_backup_thd
+ * @return
+*/
+my_bool bdq_backup_table_routine(const char* table_dropped_name,const char* db,const char* backup_dir,THD* bdq_backup_thd)
+{
+  mysql_reset_thd_for_next_command(bdq_backup_thd);
+  char* query_rename_table;
+  char* query_create_virtual_table = new char[strlen(query_create_table) + strlen(db) + strlen(table_dropped_name)];
+
+
+  //1.改变当前线程的sql_log_bin = 0;不写binlog操作。
+  if (bdq_backup_thd->variables.sql_log_bin)
+    bdq_backup_thd->variables.option_bits |= OPTION_BIN_LOG;
+  else
+    bdq_backup_thd->variables.option_bits &= ~OPTION_BIN_LOG;
+
+  //2.create database if not exists.
+  if(bdq_prepare_execute_command(bdq_backup_thd,
+                                 query_create_backup_database,db,table_dropped_name))
+  {
+    LEX  *const lex= bdq_backup_thd->lex;
+    HA_CREATE_INFO create_info(lex->create_info);
+    char *alias;
+    if (!(alias=bdq_backup_thd->strmake(lex->name.str, lex->name.length)) ||
+        (check_and_convert_db_name(&lex->name, FALSE) != IDENT_NAME_OK))
+    {
+
+    }
+    int res= mysql_create_db(bdq_backup_thd,(lower_case_table_names == 2 ? alias :
+                                             lex->name.str), &create_info, 0);
+    bdq_after_execute_command(bdq_backup_thd);
+
+    if(res)
+    {
+      return FALSE;
+    }
+  }
+  else
+  {
+    return FALSE;
+  }
+
+  //3.rename A.a to B.a.back.timestamp
+  query_rename_table =  new char[strlen("RENAME TABLE %s.%s to recycle_bin_bdq.%s_%s")+
+                                 (strlen(db)+strlen(table_dropped_name))*2];
+  sprintf(query_rename_table,"RENAME TABLE %s.%s to recycle_bin_bdq.%s_%s",db,table_dropped_name,db,table_dropped_name);
+  if(bdq_prepare_execute_command(bdq_backup_thd,query_rename_table,db,table_dropped_name))
+  {
+    LEX  *const lex= bdq_backup_thd->lex;
+    /* first SELECT_LEX (have special meaning for many of non-SELECTcommands) */
+    SELECT_LEX *const select_lex= lex->select_lex;
+    /* first table of first SELECT_LEX */
+    TABLE_LIST *const first_table= select_lex->get_table_list();
+    if (mysql_rename_tables(bdq_backup_thd, first_table, 0))
+    {
+      bdq_after_execute_command(bdq_backup_thd);
+      return FALSE;
+    }
+    bdq_after_execute_command(bdq_backup_thd);
+  }
+  else
+  {
+    return FALSE;
+  }
+
+  //4.create A.a(id int not null auto_increment primary key);
+  sprintf(query_create_virtual_table,
+          "CREATE TABLE %s.%s(id int not null auto_increment primary key)ENGINE=INNODB",db,table_dropped_name);
+  if(bdq_prepare_execute_command(bdq_backup_thd,query_create_virtual_table,db,table_dropped_name))
+  {
+    int res= FALSE;
+    LEX  *const lex= bdq_backup_thd->lex;
+    /* first SELECT_LEX (have special meaning for many of non-SELECTcommands) */
+    SELECT_LEX *const select_lex= lex->select_lex;
+    /* first table of first SELECT_LEX */
+    TABLE_LIST *const first_table= select_lex->get_table_list();
+
+    bool link_to_local;
+    TABLE_LIST *create_table= first_table;
+    TABLE_LIST *select_tables= lex->create_last_non_select_table->next_global;
+    HA_CREATE_INFO create_info(lex->create_info);
+    Alter_info alter_info(lex->alter_info, bdq_backup_thd->mem_root);
+    if ((res= create_table_precheck(bdq_backup_thd, select_tables, create_table)))
+    {
+
+      return FALSE;
+    }
+
+    /* Might have been updated in create_table_precheck */
+    create_info.alias= create_table->alias;
+
+    if (create_info.tablespace)
+    {
+      if (check_tablespace_name(create_info.tablespace) != IDENT_NAME_OK)
+      {
+        return FALSE;
+      }
+
+      if (!bdq_backup_thd->make_lex_string(&create_table->target_tablespace_name,
+                                create_info.tablespace,
+                                strlen(create_info.tablespace), false))
+      {
+        return FALSE;
+      }
+
+    }
+    res= mysql_create_table(bdq_backup_thd, create_table,
+                            &create_info, &alter_info);
+    bdq_after_execute_command(bdq_backup_thd);
+    if(res)
+    {
+      return FALSE;
+    }
+  }
+  else
+  {
+    return FALSE;
+  }
+
+  //5.increment backup tables.
+
+  return TRUE;
+}
+
+
+/**
+ *
+ * @param drop_query
+ * @param db
+ * @param backup_dir
+ * @return
+*/
+my_bool bdq_backup(const char* drop_query,const char* db,const char* backup_dir)
+{
+  bdq_backup_thd = (THD*)my_get_thread_local(THR_THD);
+  Parser_state parser_state;
+  struct st_mysql_const_lex_string new_db;
+  new_db.str=db;
+  new_db.length = strlen(db);
+  bdq_backup_thd->reset_db(new_db);
+
+  alloc_query(bdq_backup_thd, drop_query,strlen(drop_query));
+  if(parser_state.init(bdq_backup_thd, bdq_backup_thd->query().str, bdq_backup_thd->query().length))
+  {
+    return FALSE;
+  }
+
+  mysql_reset_thd_for_next_command(bdq_backup_thd);
+  lex_start(bdq_backup_thd);
+  bdq_backup_thd->m_parser_state= &parser_state;
+  bdq_backup_thd->m_parser_state= NULL;
+  LEX* lex= bdq_backup_thd->lex;
+  bool err= bdq_backup_thd->get_stmt_da()->is_error();
+
+  err=parse_sql(bdq_backup_thd, &parser_state, NULL);
+  if(err)
+  {
+    sql_print_error("Plugin bdq parse_sql error");
+    return FALSE;
+  }
+
+  if(!(lex->query_tables))
+  {
+    return TRUE;
+  }
+  char* in_db = strdup(lex->query_tables->db);
+  lex_end(lex);
+
+  switch(lex->sql_command)
+  {
+    case SQLCOM_DROP_TABLE:
+    {
+      char* in_table = strdup(lex->query_tables->table_name);
+      sql_print_information("Master drop table %s.%s",in_db,in_table);
+      if(bdq_backup_table_routine(in_table,in_db,backup_dir,bdq_backup_thd))
+      {
+        sql_print_information("Backup table %s.%s successfully.",in_db,in_table);
+      }
+      else
+      {
+        sql_print_error("Backup table %s.%s failed",in_db,in_table);
+      }
+      bdq_after_execute_command(bdq_backup_thd);
+      break;
+    }
+
+    case SQLCOM_DROP_DB:
+    {
+      sql_print_information("master drop database %s",db);
+      break;
+    }
+
+    default:
+    {
+      break;
+    }
+  }
+
+
+  return TRUE;
+}
+
 
 C_MODE_START
 
@@ -51,23 +309,7 @@ int bdq_request_dump(Binlog_relay_IO_param *param,
   return 0;
 }
 
-my_bool bdq_backup(const char* drop_query,const char* db,const char* backup_dir)
-{
-  Parser_state parser_state;
-  struct st_mysql_const_lex_string new_db;
-  new_db.str=db;
-  new_db.length = strlen(db);
-  bdq_backup_thd->reset_db(new_db);
-  alloc_query(bdq_backup_thd, drop_query,strlen(drop_query));
-  if(parser_state.init(bdq_backup_thd, bdq_backup_thd->query().str, bdq_backup_thd->query().length))
-  {
-    return FALSE;
-  }
-  mysql_parse(bdq_backup_thd, &parser_state);
 
-
-  return TRUE;
-}
 
 int bdq_read_event(Binlog_relay_IO_param *param,
 			       const char *packet, unsigned long len,
@@ -75,10 +317,9 @@ int bdq_read_event(Binlog_relay_IO_param *param,
 {
   Log_event *ev= NULL;
   Log_event_type type= binary_log::UNKNOWN_EVENT;
-  my_bool need_backup = FALSE;
+  bool maybe_should_bk = false;
   const char* tmp_event_buf;
   unsigned long tmp_event_len;
-
   const char *error_msg= NULL;
 
   int semisync = bdq_slave.semisync_event(packet, len,
@@ -110,6 +351,8 @@ int bdq_read_event(Binlog_relay_IO_param *param,
     }
     else
     {
+      //在从来没收到过FDE时，其它所有的binlog event都不做检测，直接返回。
+      //意味着bdq的功能只有重启复制，或者master flush logs之后才会生效。
       return 0;
     }
   }
@@ -117,17 +360,6 @@ int bdq_read_event(Binlog_relay_IO_param *param,
   //已经收到了FORMAT_DESCRIPTION_EVENT，再对event type进行判断。
   if(type == binary_log::QUERY_EVENT)
   {
-    //check need backup(drop table) @todo drop schema backup.
-//    Log_event* ev = Log_event::read_log_event(file, glob_description_event,
-//                                              opt_verify_binlog_checksum,
-//                                              rewrite_db_filter);
-
-
-
-//    ev  = new Query_log_event(tmp_event_buf, tmp_event_len,(const Format_description_log_event* )glob_description_event,
-//                              binary_log::QUERY_EVENT);
-
-    //glob_description_event->common_footer->checksum_alg = binary_log::BINLOG_CHECKSUM_ALG_CRC32;
     if (!(ev= Log_event::read_log_event((const char*)tmp_event_buf ,
                                         tmp_event_len, &error_msg,
                                         glob_description_event,
@@ -139,12 +371,29 @@ int bdq_read_event(Binlog_relay_IO_param *param,
     binary_log::Query_event* qe = new Query_log_event;
     qe = qle;
 
-    if(strlen(qe->query))
     {
-      sql_print_information("query event->query:%s",qe->query);
+      //find substr.
+      int i=0;
+      int len_query=strlen(qe->query);
+      for(i=0;i<strlen(qe->query);i++)
+      {
+        if(strncasecmp(qe->query+i,"DROP",4) ==0 )
+        {
+          maybe_should_bk = true;
+          break;
+        }
+      }
     }
 
-    if(bdq_backup(qe->query,qe->db,home_dir));
+    if(!maybe_should_bk)
+    {
+      return 0;
+    }
+
+    if(bdq_backup(qe->query,qe->db,home_dir))
+    {
+      //sql_print_error("Plugin bdq backup failed");
+    }
   }
   else
   {
