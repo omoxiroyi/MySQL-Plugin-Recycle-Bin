@@ -18,7 +18,7 @@ IF(SSL_DEFINES)
 ENDIF()
 
 
-SET(BDQ_SOURCES bdq.cc bdq_slave.cc
-        bdq_plugin.cc bdq.h bdq_slave.h)
-MYSQL_ADD_PLUGIN(bdq ${BDQ_SOURCES}
-  MODULE_ONLY MODULE_OUTPUT_NAME "bdq")
+SET(RECYCLE_BIN src/bdq.cc src/bdq_slave.cc
+        src/bdq_plugin.cc src/bdq.h src/bdq_slave.h)
+MYSQL_ADD_PLUGIN(recycle_bin ${RECYCLE_BIN}
+  MODULE_ONLY MODULE_OUTPUT_NAME "recycle_bin")

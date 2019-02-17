@@ -344,6 +344,7 @@ int bdq_read_event(Binlog_relay_IO_param *param,
                                           opt_verify_binlog_checksum)))
       {
         sql_print_error("Could not construct log event object: %s", error_msg);
+        return 1;
       }
       delete glob_description_event;
       glob_description_event= (Format_description_log_event*) ev;
@@ -526,7 +527,7 @@ static int bdq_plugin_deinit(void *p)
 }
 
 
-struct Mysql_replication bdq_plugin= {
+struct Mysql_replication recycle_bin= {
   MYSQL_REPLICATION_INTERFACE_VERSION
 };
 
@@ -536,10 +537,10 @@ struct Mysql_replication bdq_plugin= {
 mysql_declare_plugin(bdq)
 {
   MYSQL_REPLICATION_PLUGIN,
-  &bdq_plugin,
-  "bdq",
+  &recycle_bin,
+  "recycle_bin",
   "Ashe Sun",
-  "backup drop query",
+  "MySQL Plugin recycle_bin",
   PLUGIN_LICENSE_GPL,
   bdq_plugin_init, /* Plugin Init */
   bdq_plugin_deinit, /* Plugin Deinit */

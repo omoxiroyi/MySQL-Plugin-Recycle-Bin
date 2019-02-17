@@ -61,9 +61,8 @@ int bdqSlave::semisync_event(const char *header,
   }
   else //没有加载rpl_semi_sync_slave插件
   {
-//    sql_print_error("Missing magic number for semi-sync packet, packet "
-//                    "len: %lu", total_len);
-//    read_res = -1;
+    *payload_len = total_len;
+    *payload     = header;
     return 0;
   }
 
