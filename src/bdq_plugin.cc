@@ -41,6 +41,14 @@ static THD* bdq_backup_thd = NULL;
 static char query_create_table[]="CREATE TABLE  (id int not null auto_increment primary key)ENGINE=INNODB";
 static const char query_create_backup_database[] = "create database if not exists recycle_bin_bdq";
 
+/**
+ * recycle bin所有对于数据库内部的修改都是通过IO线程来完成的。此函数用于在执行某个操作前的线程环境准备。
+ * @param bdq_backup_thd
+ * @param query
+ * @param db
+ * @param table_name
+ * @return true ok; false error
+ */
 my_bool bdq_prepare_execute_command(THD* bdq_backup_thd,const char* query,const char* db,const char* table_name)
 {
 
@@ -66,6 +74,10 @@ my_bool bdq_prepare_execute_command(THD* bdq_backup_thd,const char* query,const 
   return !err;
 }
 
+/**
+ * 用于在执行操作后，释放相关的锁，关闭打开的表。
+ * @param bdq_backup_thd
+ */
 void bdq_after_execute_command(THD* bdq_backup_thd)
 {
   bdq_backup_thd->mdl_context.release_statement_locks();
@@ -87,18 +99,18 @@ void bdq_after_execute_command(THD* bdq_backup_thd)
 */
 my_bool bdq_backup_table_routine(const char* table_dropped_name,const char* db,const char* backup_dir,THD* bdq_backup_thd)
 {
-  mysql_reset_thd_for_next_command(bdq_backup_thd);
-  char* query_rename_table;
+  char* query_rename_table = new char[strlen("RENAME TABLE %s.%s to recycle_bin_bdq.%s_%s")+
+                                      (strlen(db)+strlen(table_dropped_name))*2];
   char* query_create_virtual_table = new char[strlen(query_create_table) + strlen(db) + strlen(table_dropped_name)];
+  int res = FALSE;
 
-
-  //1.改变当前线程的sql_log_bin = 0;不写binlog操作。
+  //stage 1.改变当前线程的sql_log_bin = 0;不写binlog操作。
   if (bdq_backup_thd->variables.sql_log_bin)
     bdq_backup_thd->variables.option_bits |= OPTION_BIN_LOG;
   else
     bdq_backup_thd->variables.option_bits &= ~OPTION_BIN_LOG;
 
-  //2.create database if not exists.
+  //stage 2.create database if not exists.
   if(bdq_prepare_execute_command(bdq_backup_thd,
                                  query_create_backup_database,db,table_dropped_name))
   {
@@ -110,23 +122,22 @@ my_bool bdq_backup_table_routine(const char* table_dropped_name,const char* db,c
     {
 
     }
-    int res= mysql_create_db(bdq_backup_thd,(lower_case_table_names == 2 ? alias :
+    res= mysql_create_db(bdq_backup_thd,(lower_case_table_names == 2 ? alias :
                                              lex->name.str), &create_info, 0);
     bdq_after_execute_command(bdq_backup_thd);
 
     if(res)
     {
-      return FALSE;
+      sql_print_error("Create backup database error");
+      goto exit_bdq_btr;
     }
   }
   else
   {
-    return FALSE;
+    goto exit_bdq_btr;
   }
 
-  //3.rename A.a to B.a.back.timestamp
-  query_rename_table =  new char[strlen("RENAME TABLE %s.%s to recycle_bin_bdq.%s_%s")+
-                                 (strlen(db)+strlen(table_dropped_name))*2];
+  //stage 3.rename A.a to B.a.back.timestamp
   sprintf(query_rename_table,"RENAME TABLE %s.%s to recycle_bin_bdq.%s_%s",db,table_dropped_name,db,table_dropped_name);
   if(bdq_prepare_execute_command(bdq_backup_thd,query_rename_table,db,table_dropped_name))
   {
@@ -138,21 +149,22 @@ my_bool bdq_backup_table_routine(const char* table_dropped_name,const char* db,c
     if (mysql_rename_tables(bdq_backup_thd, first_table, 0))
     {
       bdq_after_execute_command(bdq_backup_thd);
-      return FALSE;
+      sql_print_error("Backup table in rename stage failed");
+      goto exit_bdq_btr;
     }
     bdq_after_execute_command(bdq_backup_thd);
   }
   else
   {
-    return FALSE;
+    goto exit_bdq_btr;
   }
 
-  //4.create A.a(id int not null auto_increment primary key);
+  //stage 4.create A.a(id int not null auto_increment primary key);
   sprintf(query_create_virtual_table,
           "CREATE TABLE %s.%s(id int not null auto_increment primary key)ENGINE=INNODB",db,table_dropped_name);
   if(bdq_prepare_execute_command(bdq_backup_thd,query_create_virtual_table,db,table_dropped_name))
   {
-    int res= FALSE;
+    res= FALSE;
     LEX  *const lex= bdq_backup_thd->lex;
     /* first SELECT_LEX (have special meaning for many of non-SELECTcommands) */
     SELECT_LEX *const select_lex= lex->select_lex;
@@ -165,8 +177,8 @@ my_bool bdq_backup_table_routine(const char* table_dropped_name,const char* db,c
     Alter_info alter_info(lex->alter_info, bdq_backup_thd->mem_root);
     if ((res= create_table_precheck(bdq_backup_thd, select_tables, create_table)))
     {
-
-      return FALSE;
+      sql_print_error("Backup table failed in create new table stage[precheck]");
+      goto exit_bdq_btr;
     }
 
     /* Might have been updated in create_table_precheck */
@@ -176,14 +188,16 @@ my_bool bdq_backup_table_routine(const char* table_dropped_name,const char* db,c
     {
       if (check_tablespace_name(create_info.tablespace) != IDENT_NAME_OK)
       {
-        return FALSE;
+        sql_print_error("Backup table failed in create new table stage[check_tablespace_name]");
+        goto exit_bdq_btr;
       }
 
       if (!bdq_backup_thd->make_lex_string(&create_table->target_tablespace_name,
                                 create_info.tablespace,
                                 strlen(create_info.tablespace), false))
       {
-        return FALSE;
+        sql_print_error("Backup table failed in create new table stage[make_lex_string]");
+        goto exit_bdq_btr;
       }
 
     }
@@ -192,22 +206,28 @@ my_bool bdq_backup_table_routine(const char* table_dropped_name,const char* db,c
     bdq_after_execute_command(bdq_backup_thd);
     if(res)
     {
-      return FALSE;
+      sql_print_error("Backup table failed in create new table stage[mysql_create_table]");
+      goto exit_bdq_btr;
     }
   }
   else
   {
-    return FALSE;
+    goto exit_bdq_btr;
   }
 
-  //5.increment backup tables.
+  //stage 5.increment backup tables successfully status.
+
+  exit_bdq_btr:
+  bdq_after_execute_command(bdq_backup_thd);
+  delete[] query_rename_table;
+  delete[] query_create_virtual_table;
 
   return TRUE;
 }
 
 
 /**
- *
+ * 备份入口函数。
  * @param drop_query
  * @param db
  * @param backup_dir
@@ -288,7 +308,7 @@ C_MODE_START
 
 int bdq_reset_slave(Binlog_relay_IO_param *param)
 {
-  // TODO: reset semi-sync slave status here
+  //Nothing to do.
   return 0;
 }
 
@@ -310,10 +330,12 @@ int bdq_read_event(Binlog_relay_IO_param *param,
   const char* tmp_event_buf;
   unsigned long tmp_event_len;
   const char *error_msg= NULL;
+  int i=0;
+  int len_query = 0;
 
   if(!recycle_bin_enabled) //如果全局参数没有开启，则直接返回。提高性能。
   {
-    return 0;
+    goto exit_read_event;
   }
 
   bdq_slave.semisync_event(packet, len,
@@ -331,7 +353,7 @@ int bdq_read_event(Binlog_relay_IO_param *param,
                                           opt_verify_binlog_checksum)))
       {
         sql_print_error("Plugin recycle_bin could not construct log event object: %s", error_msg);
-        return 1;
+        goto exit_read_event;
       }
       delete glob_description_event;
       glob_description_event= (Format_description_log_event*) ev;
@@ -343,7 +365,7 @@ int bdq_read_event(Binlog_relay_IO_param *param,
     {
       //在从来没收到过FDE时，其它所有的binlog event都不做检测，直接返回。
       //意味着bdq的功能只有重启复制，或者master flush logs之后才会生效。
-      return 0;
+      goto exit_read_event;
     }
   }
 
@@ -361,34 +383,32 @@ int bdq_read_event(Binlog_relay_IO_param *param,
     binary_log::Query_event* qe = new Query_log_event;
     qe = qle;
 
+
+    //find substr "DROP",that maybe should bk.
+    len_query=strlen(qe->query);
+    for(i=0;i<len_query;i++)
     {
-      //find substr.
-      int i=0;
-      int len_query=strlen(qe->query);
-      for(i=0;i<len_query;i++)
+      if(strncasecmp(qe->query+i,"DROP",4) ==0 )
       {
-        if(strncasecmp(qe->query+i,"DROP",4) ==0 )
-        {
-          maybe_should_bk = true;
-          break;
-        }
+        maybe_should_bk = true;
+        break;
       }
     }
 
     if(!maybe_should_bk)
     {
-      return 0;
+      goto exit_read_event;
     }
-
-    if(bdq_backup(qe->query,qe->db,home_dir))
-    {
-      //sql_print_error("Plugin bdq backup failed");
-    }
+    bdq_backup(qe->query,qe->db,home_dir);
   }
   else //其它非binary_log::QUERY_EVENT的Drop行为，有吗？
   {
-    return 0;
+    goto exit_read_event;
   }
+
+  exit_read_event:
+  delete ev;
+  ev=NULL;
 
   return 0;
 }
@@ -478,14 +498,23 @@ static MYSQL_SYSVAR_BOOL(enabled, recycle_bin_enabled,
 
 static MYSQL_SYSVAR_ULONG(trace_level, recycle_bin_trace_level,
   PLUGIN_VAR_OPCMDARG,
- "The tracing level for semi-sync replication.",
+ "The tracing level for recycle_bin.",
   NULL,				  // check
                           &fix_recycle_bin_trace_level, // update
   32, 0, ~0UL, 1);
 
+static MYSQL_SYSVAR_ULONG(expire_hours,
+        recycle_bin_expire_hours,
+        PLUGIN_VAR_OPCMDARG,
+        "recycle bin expire hours",
+        NULL,
+        NULL,
+        2,0,48,1);
+
 static SYS_VAR* bdq_system_vars[]= {
   MYSQL_SYSVAR(enabled),
   MYSQL_SYSVAR(trace_level),
+  MYSQL_SYSVAR(expire_hours),
   NULL,
 };
 
@@ -514,7 +543,9 @@ static int bdq_plugin_init(void *p)
 //  if (repl_semisync.initObject())
 //    return 1;
   if(register_binlog_relay_io_observer(&bdq_relay_io_observer, p))
+  {
     return 1;
+  }
 
   glob_description_event= new Format_description_log_event(3);
   return 0;
@@ -545,7 +576,7 @@ mysql_declare_plugin(bdq)
   &recycle_bin,
   "recycle_bin",
   "Ashe Sun",
-  "MySQL Plugin recycle_bin",
+  "MySQL Recycle Bin",
   PLUGIN_LICENSE_GPL,
   bdq_plugin_init, /* Plugin Init */
   bdq_plugin_deinit, /* Plugin Deinit */
