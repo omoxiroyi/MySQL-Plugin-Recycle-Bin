@@ -27,7 +27,7 @@ class bdqSlave
   :public bdqBase {
 public:
  bdqSlave()
-   :slave_enabled_(false)
+   :recycle_bin_enabled_(false)
   {}
   ~bdqSlave() {}
 
@@ -41,10 +41,10 @@ public:
   int initObject();
 
   bool getSlaveEnabled() {
-    return slave_enabled_;
+    return recycle_bin_enabled_;
   }
-  void setSlaveEnabled(bool enabled) {
-    slave_enabled_ = enabled;
+  void setRecycleBinEnabled(bool enabled) {
+    recycle_bin_enabled_ = enabled;
   }
 
   /* A slave reads the semi-sync packet header and separate the metadata
@@ -60,7 +60,7 @@ public:
    * Return:
    *  0: success;  non-zero: error
    */
-  int semisync_event(const char *header, unsigned long total_len, bool *need_reply,
+  int semisync_event(const char *header, unsigned long total_len,
                      const char **payload, unsigned long *payload_len);
 
   /* A slave replies to the master indicating its replication process.  It
@@ -84,14 +84,14 @@ public:
 private:
   /* True when initObject has been called */
   bool init_done_;
-  bool slave_enabled_;        /* semi-sycn is enabled on the slave */
+  bool recycle_bin_enabled_;        /* semi-sycn is enabled on the slave */
   MYSQL *mysql_reply;         /* connection to send reply */
 };
 
 
 /* System and status variables for the slave component */
-extern char bdq_slave_enabled;
-extern unsigned long rpl_semi_sync_slave_trace_level;
-extern char rpl_semi_sync_slave_status;
+extern char recycle_bin_enabled;
+extern unsigned long recycle_bin_trace_level;
+extern char recycle_bin_status;
 
 #endif /* SEMISYNC_SLAVE_H */
