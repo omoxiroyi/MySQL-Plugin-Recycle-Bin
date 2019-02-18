@@ -30,24 +30,16 @@
 #include "sql_db.h"
 #include "sql_table.h"
 
+
+void switch_recycle_bin_status(char in_status);
+
 bdqSlave bdq_slave;
 static Format_description_log_event*  glob_description_event = NULL;
 static my_bool opt_verify_binlog_checksum= TRUE;
 static my_bool received_fde = FALSE;
 static THD* bdq_backup_thd = NULL;
-static Channel_info* channel_info= NULL;
 static char query_create_table[]="CREATE TABLE  (id int not null auto_increment primary key)ENGINE=INNODB";
 static const char query_create_backup_database[] = "create database if not exists recycle_bin_bdq";
-
-
-/*
-  indicate whether or not the slave should send a reply to the master.
-
-  This is set to true in repl_semi_slave_read_event if the current
-  event read is the last event of a transaction. And the value is
-  checked in repl_semi_slave_queue_event.
-*/
-bool semi_sync_need_reply= false;
 
 my_bool bdq_prepare_execute_command(THD* bdq_backup_thd,const char* query,const char* db,const char* table_name)
 {
@@ -66,9 +58,7 @@ my_bool bdq_prepare_execute_command(THD* bdq_backup_thd,const char* query,const 
   mysql_reset_thd_for_next_command(bdq_backup_thd);
   lex_start(bdq_backup_thd);
   bdq_backup_thd->m_parser_state= &parser_state;
-  //invoke_pre_parse_rewrite_plugins(bdq_backup_thd);
   bdq_backup_thd->m_parser_state= NULL;
-  //LEX* lex= bdq_backup_thd->lex;
   bool err= bdq_backup_thd->get_stmt_da()->is_error();
 
   err=parse_sql(bdq_backup_thd, &parser_state, NULL);
@@ -169,7 +159,6 @@ my_bool bdq_backup_table_routine(const char* table_dropped_name,const char* db,c
     /* first table of first SELECT_LEX */
     TABLE_LIST *const first_table= select_lex->get_table_list();
 
-    bool link_to_local;
     TABLE_LIST *create_table= first_table;
     TABLE_LIST *select_tables= lex->create_last_non_select_table->next_global;
     HA_CREATE_INFO create_info(lex->create_info);
@@ -280,7 +269,7 @@ my_bool bdq_backup(const char* drop_query,const char* db,const char* backup_dir)
 
     case SQLCOM_DROP_DB:
     {
-      sql_print_information("master drop database %s",db);
+      sql_print_information("Master drop database %s",db);
       break;
     }
 
@@ -322,17 +311,15 @@ int bdq_read_event(Binlog_relay_IO_param *param,
   unsigned long tmp_event_len;
   const char *error_msg= NULL;
 
-  int semisync = bdq_slave.semisync_event(packet, len,
-                                          &semi_sync_need_reply,
+  if(!recycle_bin_enabled) //如果全局参数没有开启，则直接返回。提高性能。
+  {
+    return 0;
+  }
+
+  bdq_slave.semisync_event(packet, len,
                                           &tmp_event_buf, &tmp_event_len);
-  if(semisync)
-  {
-    type=(Log_event_type)packet[EVENT_TYPE_OFFSET+2];
-  }
-  else
-  {
-    type=(Log_event_type)packet[EVENT_TYPE_OFFSET];
-  }
+
+  type = (Log_event_type)tmp_event_buf[EVENT_TYPE_OFFSET];
 
   if(!received_fde) //还没有收到过FORMAT_DESCRIPTION_EVENT，进行检测。
   {
@@ -343,12 +330,14 @@ int bdq_read_event(Binlog_relay_IO_param *param,
                                           glob_description_event,
                                           opt_verify_binlog_checksum)))
       {
-        sql_print_error("Could not construct log event object: %s", error_msg);
+        sql_print_error("Plugin recycle_bin could not construct log event object: %s", error_msg);
         return 1;
       }
       delete glob_description_event;
       glob_description_event= (Format_description_log_event*) ev;
       received_fde = TRUE;
+      bdq_slave.setRecycleBinEnabled(received_fde);
+      switch_recycle_bin_status('1');
     }
     else
     {
@@ -358,7 +347,7 @@ int bdq_read_event(Binlog_relay_IO_param *param,
     }
   }
 
-  //已经收到了FORMAT_DESCRIPTION_EVENT，再对event type进行判断。
+  //已经收到了FORMAT_DESCRIPTION_EVENT，再对event type进行判断,是否可能需要备份。
   if(type == binary_log::QUERY_EVENT)
   {
     if (!(ev= Log_event::read_log_event((const char*)tmp_event_buf ,
@@ -376,7 +365,7 @@ int bdq_read_event(Binlog_relay_IO_param *param,
       //find substr.
       int i=0;
       int len_query=strlen(qe->query);
-      for(i=0;i<strlen(qe->query);i++)
+      for(i=0;i<len_query;i++)
       {
         if(strncasecmp(qe->query+i,"DROP",4) ==0 )
         {
@@ -396,11 +385,10 @@ int bdq_read_event(Binlog_relay_IO_param *param,
       //sql_print_error("Plugin bdq backup failed");
     }
   }
-  else
+  else //其它非binary_log::QUERY_EVENT的Drop行为，有吗？
   {
     return 0;
   }
-
 
   return 0;
 }
@@ -410,29 +398,19 @@ int bdq_queue_event(Binlog_relay_IO_param *param,
 				unsigned long event_len,
 				uint32 flags)
 {
-//  if (rpl_semi_sync_slave_status && semi_sync_need_reply)
-//  {
-//    /*
-//      We deliberately ignore the error in slaveReply, such error
-//      should not cause the slave IO thread to stop, and the error
-//      messages are already reported.
-//    */
-//    (void) repl_semisync.slaveReply(param->mysql,
-//                                    param->master_log_name,
-//                                    param->master_log_pos);
-//  }
+  //Nothing to do.
   return 0;
 }
 
 int bdq_io_start(Binlog_relay_IO_param *param)
 {
-  //return repl_semisync.slaveStart(param);
+  //Nothing to do.
   return 0;
 }
 
 int bdq_io_end(Binlog_relay_IO_param *param)
 {
-  //return repl_semisync.slaveStop(param);
+  //Nothing to do.
   return 0;
 }
 
@@ -443,39 +421,66 @@ int bdq_sql_stop(Binlog_relay_IO_param *param, bool aborted)
 
 C_MODE_END
 
-static void fix_rpl_semi_sync_slave_enabled(MYSQL_THD thd,
-					    SYS_VAR *var,
-					    void *ptr,
-					    const void *val)
+void switch_recycle_bin_status(char in_status)
 {
-  *(char *)ptr= *(char *)val;
-  bdq_slave.setSlaveEnabled(bdq_slave_enabled != 0);
+  if(in_status && !recycle_bin_status)
+  {
+    recycle_bin_status = 1;
+    sql_print_information("Plugin recycle_bin switch Recycle_bin_status ON");
+
+  }
+  if(!in_status && recycle_bin_status)
+  {
+    recycle_bin_status = 0;
+    sql_print_information("Plugin recycle_bin switch Recycle_bin_status OFF");
+  }
   return;
 }
 
-static void fix_rpl_semi_sync_trace_level(MYSQL_THD thd,
-					  SYS_VAR *var,
-					  void *ptr,
-					  const void *val)
+static void fix_recycle_bin_enabled(MYSQL_THD thd,
+                                    SYS_VAR *var,
+                                    void *ptr,
+                                    const void *val)
+{
+  *(char *)ptr= *(char *)val;
+  bdq_slave.setRecycleBinEnabled(recycle_bin_enabled != 0);
+  if(!recycle_bin_enabled) //set global recycle_bin_enabled=OFF;
+  {
+    switch_recycle_bin_status(recycle_bin_enabled);
+  }
+  else  //set global recycle_bin_enabled=ON;
+  {
+    if(received_fde)
+    {
+      switch_recycle_bin_status(recycle_bin_enabled);
+    }
+  }
+  return;
+}
+
+static void fix_recycle_bin_trace_level(MYSQL_THD thd,
+                                        SYS_VAR *var,
+                                        void *ptr,
+                                        const void *val)
 {
   *(unsigned long *)ptr= *(unsigned long *)val;
-  bdq_slave.setTraceLevel(rpl_semi_sync_slave_trace_level);
+  bdq_slave.setTraceLevel(recycle_bin_trace_level);
   return;
 }
 
 /* plugin system variables */
-static MYSQL_SYSVAR_BOOL(enabled, bdq_slave_enabled,
+static MYSQL_SYSVAR_BOOL(enabled, recycle_bin_enabled,
   PLUGIN_VAR_OPCMDARG,
- "Enable semi-synchronous replication slave (disabled by default). ",
+ "Enable recycle_bin plugin(disabled by default). ",
   NULL,				   // check
-  &fix_rpl_semi_sync_slave_enabled, // update
+                         &fix_recycle_bin_enabled, // update
   0);
 
-static MYSQL_SYSVAR_ULONG(trace_level, rpl_semi_sync_slave_trace_level,
+static MYSQL_SYSVAR_ULONG(trace_level, recycle_bin_trace_level,
   PLUGIN_VAR_OPCMDARG,
  "The tracing level for semi-sync replication.",
   NULL,				  // check
-  &fix_rpl_semi_sync_trace_level, // update
+                          &fix_recycle_bin_trace_level, // update
   32, 0, ~0UL, 1);
 
 static SYS_VAR* bdq_system_vars[]= {
@@ -487,8 +492,8 @@ static SYS_VAR* bdq_system_vars[]= {
 
 /* plugin status variables */
 static SHOW_VAR bdq_status_vars[]= {
-  {"Rpl_semi_sync_slave_status",
-   (char*) &rpl_semi_sync_slave_status, SHOW_BOOL, SHOW_SCOPE_GLOBAL},
+  {"Recycle_bin_status",
+   (char*) &recycle_bin_status, SHOW_BOOL, SHOW_SCOPE_GLOBAL},
   {NULL, NULL, SHOW_BOOL, SHOW_SCOPE_GLOBAL},
 };
 
