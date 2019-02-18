@@ -21,6 +21,7 @@
 char recycle_bin_enabled;
 char recycle_bin_status= 0;
 unsigned long recycle_bin_trace_level;
+unsigned long recycle_bin_expire_hours;
 
 int bdqSlave::initObject()
 {
@@ -46,15 +47,13 @@ int bdqSlave::semisync_event(const char *header,
                              const char **payload,
                              unsigned long *payload_len)
 {
-  if ((unsigned char)(header[0]) == kPacketMagicNum) //mysqld加载了rpl_semi_sync_slave插件
+  if ((unsigned char)(header[0]) == kPacketMagicNum) //半同步复制环境
   {
-//    *need_reply  = (header[1] & kPacketFlagSync);
     *payload_len = total_len - 2;
     *payload     = header + 2;
     return 1;
-
   }
-  else //没有加载rpl_semi_sync_slave插件
+  else //异步复制环境
   {
     *payload_len = total_len;
     *payload     = header;
@@ -65,14 +64,6 @@ int bdqSlave::semisync_event(const char *header,
 int bdqSlave::slaveStart(Binlog_relay_IO_param *param)
 {
   bool semi_sync= getSlaveEnabled();
-  
-  sql_print_information("Slave I/O thread: Start %s replication to\
- master '%s@%s:%d' in log '%s' at position %lu",
-			semi_sync ? "semi-sync" : "asynchronous",
-			param->user, param->host, param->port,
-			param->master_log_name[0] ? param->master_log_name : "FIRST",
-			(unsigned long)param->master_log_pos);
-
   if (semi_sync && !recycle_bin_status)
     recycle_bin_status= 1;
   return 0;

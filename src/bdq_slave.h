@@ -92,6 +92,7 @@ private:
 /* System and status variables for the slave component */
 extern char recycle_bin_enabled;
 extern unsigned long recycle_bin_trace_level;
+extern unsigned long recycle_bin_expire_hours;
 extern char recycle_bin_status;
 
 #endif /* SEMISYNC_SLAVE_H */
