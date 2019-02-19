@@ -21,7 +21,8 @@
 char recycle_bin_enabled;
 char recycle_bin_status= 0;
 unsigned long recycle_bin_trace_level;
-unsigned long recycle_bin_expire_hours;
+unsigned long recycle_bin_expire_seconds;
+char* recycle_bin_database_name;
 
 int bdqSlave::initObject()
 {
