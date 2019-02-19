@@ -108,8 +108,6 @@ static int make_recycle_bin_iso8601_timestamp(char *buf, ulonglong utime = 0)
   return std::min<int>(len, iso8601_size - 1);
 }
 
-
-
 /**
  * recycle bin所有对于数据库内部的修改都是通过IO线程来完成的。此函数用于在执行某个操作前的线程环境准备。
  * @param bdq_backup_thd
