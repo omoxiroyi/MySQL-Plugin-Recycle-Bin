@@ -33,6 +33,7 @@
 
 void switch_recycle_bin_status(char in_status);
 
+
 bdqSlave bdq_slave;
 static Format_description_log_event*  glob_description_event = NULL;
 static my_bool opt_verify_binlog_checksum= TRUE;
@@ -40,6 +41,74 @@ static my_bool received_fde = FALSE;
 static THD* bdq_backup_thd = NULL;
 static char query_create_table[]="CREATE TABLE  (id int not null auto_increment primary key)ENGINE=INNODB";
 static const char query_create_backup_database[] = "create database if not exists recycle_bin_bdq";
+static const int iso8601_size= 33;
+
+
+
+/**
+  Make and return an ISO 8601 / RFC 3339 compliant timestamp.
+  Heeds log_timestamps.
+
+  @param buf       A buffer of at least 26 bytes to store the timestamp in
+                   (19 + tzinfo tail + \0)
+  @param seconds   Seconds since the epoch, or 0 for "now"
+
+  @return          length of timestamp (excluding \0)
+*/
+
+static int make_recycle_bin_iso8601_timestamp(char *buf, ulonglong utime = 0)
+{
+  struct tm  my_tm;
+  char       tzinfo[7]="Z";  // max 6 chars plus \0
+  size_t     len;
+  time_t     seconds;
+
+  if (utime == 0)
+    utime= my_micro_time();
+
+  seconds= utime / 1000000;
+  utime = utime % 1000000;
+
+  if (opt_log_timestamps == 0)
+    gmtime_r(&seconds, &my_tm);
+  else
+  {
+    localtime_r(&seconds, &my_tm);
+
+#ifdef __FreeBSD__
+    /*
+      The field tm_gmtoff is the offset (in seconds) of the time represented
+      from UTC, with positive values indicating east of the Prime Meridian.
+    */
+    long tim= -my_tm.tm_gmtoff;
+#elif _WIN32
+    long tim = _timezone;
+#else
+    long tim= timezone; // seconds West of UTC.
+#endif
+    char dir= '-';
+
+    if (tim < 0)
+    {
+      dir= '+';
+      tim= -tim;
+    }
+    my_snprintf(tzinfo, sizeof(tzinfo), "%c%02d:%02d",
+                dir, (int) (tim / (60 * 60)), (int) ((tim / 60) % 60));
+  }
+
+  len= my_snprintf(buf, iso8601_size, "%04d%02d%02d%02d%02d%02d",
+                   my_tm.tm_year + 1900,
+                   my_tm.tm_mon  + 1,
+                   my_tm.tm_mday,
+                   my_tm.tm_hour,
+                   my_tm.tm_min,
+                   my_tm.tm_sec);
+
+  return std::min<int>(len, iso8601_size - 1);
+}
+
+
 
 /**
  * recycle bin所有对于数据库内部的修改都是通过IO线程来完成的。此函数用于在执行某个操作前的线程环境准备。
@@ -100,9 +169,12 @@ void bdq_after_execute_command(THD* bdq_backup_thd)
 my_bool bdq_backup_table_routine(const char* table_dropped_name,const char* db,const char* backup_dir,THD* bdq_backup_thd)
 {
   char* query_rename_table = new char[strlen("RENAME TABLE %s.%s to recycle_bin_bdq.%s_%s")+
-                                      (strlen(db)+strlen(table_dropped_name))*2];
+                                      (strlen(db)+strlen(table_dropped_name))*2 + iso8601_size];
   char* query_create_virtual_table = new char[strlen(query_create_table) + strlen(db) + strlen(table_dropped_name)];
   int res = FALSE;
+  char my_timestamp[iso8601_size];
+
+  make_recycle_bin_iso8601_timestamp(my_timestamp);
 
   //stage 1.改变当前线程的sql_log_bin = 0;不写binlog操作。
   if (bdq_backup_thd->variables.sql_log_bin)
@@ -138,7 +210,9 @@ my_bool bdq_backup_table_routine(const char* table_dropped_name,const char* db,c
   }
 
   //stage 3.rename A.a to B.a.back.timestamp
-  sprintf(query_rename_table,"RENAME TABLE %s.%s to recycle_bin_bdq.%s_%s",db,table_dropped_name,db,table_dropped_name);
+  sprintf(query_rename_table,"RENAME TABLE `%s`.`%s` to `recycle_bin_bdq`.`%s_%s_%s`",
+          db,table_dropped_name,
+          db,table_dropped_name,my_timestamp);
   if(bdq_prepare_execute_command(bdq_backup_thd,query_rename_table,db,table_dropped_name))
   {
     LEX  *const lex= bdq_backup_thd->lex;
@@ -360,6 +434,7 @@ int bdq_read_event(Binlog_relay_IO_param *param,
       received_fde = TRUE;
       bdq_slave.setRecycleBinEnabled(received_fde);
       switch_recycle_bin_status('1');
+      return 0;
     }
     else
     {
