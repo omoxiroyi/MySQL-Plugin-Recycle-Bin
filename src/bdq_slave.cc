@@ -23,6 +23,7 @@ char recycle_bin_status= 0;
 unsigned long recycle_bin_trace_level;
 unsigned long recycle_bin_expire_seconds;
 char* recycle_bin_database_name;
+unsigned long recycle_bin_check_sql_delay_period;
 
 int bdqSlave::initObject()
 {

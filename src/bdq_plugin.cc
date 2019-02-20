@@ -192,7 +192,7 @@ bool wait_for_sql_thread(ulonglong back_len)
     {
      return true; //no delay.
     }
-    usleep(1000);
+    usleep(recycle_bin_check_sql_delay_period);
   }
   return false;
 }
@@ -674,10 +674,16 @@ static MYSQL_SYSVAR_ULONG(trace_level, recycle_bin_trace_level,
 static MYSQL_SYSVAR_ULONG(expire_seconds,
         recycle_bin_expire_seconds,
         PLUGIN_VAR_OPCMDARG,
-        "recycle bin expire hours",
+        "Recycle bin expire seconds",
         NULL,
         NULL,
         1800,0,172800,1);
+static MYSQL_SYSVAR_ULONG(check_sql_delay_period,
+                          recycle_bin_check_sql_delay_period,
+                          PLUGIN_VAR_OPCMDARG,
+                          "Recycle bin check sql delay period(us)",
+                          NULL,NULL,10,0,1000000,1
+        );
 
 static MYSQL_SYSVAR_STR(database_name,
         recycle_bin_database_name,
@@ -693,6 +699,7 @@ static SYS_VAR* bdq_system_vars[]= {
   MYSQL_SYSVAR(trace_level),
   MYSQL_SYSVAR(expire_seconds),
   MYSQL_SYSVAR(database_name),
+  MYSQL_SYSVAR(check_sql_delay_period),
   NULL,
 };
 
