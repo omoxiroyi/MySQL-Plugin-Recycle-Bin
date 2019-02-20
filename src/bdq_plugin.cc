@@ -33,6 +33,9 @@
 #include "bdq_purger.h"
 #include "mysys_err.h"
 #include "my_byteorder.h"
+#include "rpl_msr.h"
+#include "rpl_mi.h"
+#include "rpl_rli.h"
 
 #ifdef HAVE_PSI_INTERFACE
 PSI_mutex_key  key_ss_mutex_bdq_purge_mutex;
@@ -44,10 +47,12 @@ PSI_thread_key key_ss_thread_bdq_purge_thread;
 
 
 
-
 void switch_recycle_bin_status(char in_status);
 bool purged_table();
 
+
+//class Relay_log_info;
+char* this_io_channel_name;
 
 bdqSlave bdq_slave;
 static Format_description_log_event*  glob_description_event = NULL;
@@ -58,6 +63,13 @@ static char query_create_table[]="CREATE TABLE  (id int not null auto_increment 
 static const char query_create_backup_database[] = "create database if not exists ``";
 const int iso8601_size= 33;
 static const char recycle_bin_time_flag[] = "ashesun";
+ulonglong new_last_master_log_pos = 0;
+ulonglong wait_for_master_log_pos = 0;
+
+char* new_last_master_log_file_name;
+char* wait_for_master_log_file_name;
+
+static ulonglong last_gtid_event_len = 0;
 
 ulonglong make_recycle_bin_iso8601_timestamp(char *buf, ulonglong utime = 0)
 {
@@ -160,6 +172,30 @@ void bdq_after_execute_command(THD* bdq_backup_thd)
   bdq_backup_thd->cleanup_after_query();
 }
 
+bool wait_for_sql_thread(ulonglong back_len)
+{
+  Master_info *mi= NULL;
+  for (mi_map::iterator it= channel_map.begin(); it!=channel_map.end(); it++)
+  {
+    mi = it->second;
+    if(memcmp(mi->get_channel(),this_io_channel_name,strlen(this_io_channel_name)) ==0 )
+    {
+      break;
+    }
+  }
+  new_last_master_log_pos -=back_len;
+  while(recycle_bin_enabled)
+  {
+    if(mi->rli->get_group_master_log_pos() >= new_last_master_log_pos &&
+                          strncmp(new_last_master_log_file_name,mi->rli->get_group_master_log_name(),
+                                  strlen(new_last_master_log_file_name)) ==0 )
+    {
+     return true; //no delay.
+    }
+    usleep(1000);
+  }
+  return false;
+}
 
 /**
  * 在遇到表删除时，选择将被删除的表rename为指定库下的表，再新建表，用于sql线程进行真正的删除。
@@ -169,7 +205,8 @@ void bdq_after_execute_command(THD* bdq_backup_thd)
  * @param bdq_backup_thd
  * @return
 */
-my_bool bdq_backup_table_routine(const char* table_dropped_name,const char* db,const char* backup_dir,THD* bdq_backup_thd)
+my_bool bdq_backup_table_routine(const char* table_dropped_name,const char* db,
+        const char* backup_dir,THD* bdq_backup_thd,ulonglong back_len)
 {
   char* query_rename_table = new char[strlen("RENAME TABLE %s.%s to %s.%s_%s")+ strlen(recycle_bin_database_name)+
                                       (strlen(db)+strlen(table_dropped_name))*2 + iso8601_size +
@@ -185,10 +222,16 @@ my_bool bdq_backup_table_routine(const char* table_dropped_name,const char* db,c
   make_recycle_bin_iso8601_timestamp(my_timestamp);
 
   //stage 1.改变当前线程的sql_log_bin = 0;不写binlog操作。
+
+  bdq_backup_thd->variables.sql_log_bin = FALSE;
   if (bdq_backup_thd->variables.sql_log_bin)
+  {
     bdq_backup_thd->variables.option_bits |= OPTION_BIN_LOG;
+  }
   else
+  {
     bdq_backup_thd->variables.option_bits &= ~OPTION_BIN_LOG;
+  }
 
   //stage 2.create database if not exists.
   sprintf(query_create_recycle_bin_db,"create database if not exists %s",recycle_bin_database_name);
@@ -220,6 +263,12 @@ my_bool bdq_backup_table_routine(const char* table_dropped_name,const char* db,c
     goto exit_bdq_btr;
   }
 
+  //stage 3.wait for sql thread no delay.
+  if(!wait_for_sql_thread(back_len))
+  {
+    backup_complete = FALSE;
+    goto exit_bdq_btr;
+  }
   //stage 3.rename A.a for backup.
   sprintf(query_rename_table,"RENAME TABLE `%s`.`%s` to `%s`.`%s_%s_%s_%s`",
           db,table_dropped_name,
@@ -309,7 +358,6 @@ my_bool bdq_backup_table_routine(const char* table_dropped_name,const char* db,c
   {
     goto exit_bdq_btr;
   }
-
   //stage 5.increment backup tables successfully status.
 
   exit_bdq_btr:
@@ -329,12 +377,18 @@ my_bool bdq_backup_table_routine(const char* table_dropped_name,const char* db,c
  * @param backup_dir
  * @return
 */
-my_bool bdq_backup(const char* drop_query,const char* db,const char* backup_dir)
+my_bool bdq_backup(const char* drop_query,const char* db,const char* backup_dir,ulonglong back_len)
 {
   Parser_state parser_state;
   struct st_mysql_const_lex_string new_db;
   new_db.str=db;
   new_db.length = strlen(db);
+
+  if(!bdq_backup_thd)
+  {
+    bdq_backup_thd = (THD*)my_get_thread_local(THR_THD);
+  }
+
   bdq_backup_thd->reset_db(new_db);
 
   alloc_query(bdq_backup_thd, drop_query,strlen(drop_query));
@@ -370,7 +424,7 @@ my_bool bdq_backup(const char* drop_query,const char* db,const char* backup_dir)
     {
       char* in_table = strdup(lex->query_tables->table_name);
       sql_print_information("Master drop table %s.%s",in_db,in_table);
-      if(bdq_backup_table_routine(in_table,in_db,backup_dir,bdq_backup_thd))
+      if(bdq_backup_table_routine(in_table,in_db,backup_dir,bdq_backup_thd,back_len))
       {
         sql_print_information("Backup table %s.%s successfully.",in_db,in_table);
       }
@@ -395,7 +449,6 @@ my_bool bdq_backup(const char* drop_query,const char* db,const char* backup_dir)
   }
   return TRUE;
 }
-
 
 C_MODE_START
 
@@ -424,6 +477,9 @@ int bdq_read_event(Binlog_relay_IO_param *param,
   const char *error_msg= NULL;
   int i=0;
   int len_query = 0;
+  bool first_fde = false;
+  this_io_channel_name = strdup(param->channel_name);
+
 
   if(!recycle_bin_enabled) //如果全局参数没有开启，则直接返回。提高性能。
   {
@@ -432,12 +488,22 @@ int bdq_read_event(Binlog_relay_IO_param *param,
 
   bdq_slave.semisync_event(packet, len,
                                           &tmp_event_buf, &tmp_event_len);
-
   type = (Log_event_type)tmp_event_buf[EVENT_TYPE_OFFSET];
+
+  new_last_master_log_pos = param->master_log_pos;
+  new_last_master_log_file_name = strdup(param->master_log_name);
+
+  if(type == binary_log::GTID_LOG_EVENT)
+  {
+    last_gtid_event_len = tmp_event_len;
+  }
+
+  //memcpy(&new_last_master_log_pos, tmp_event_buf + LOG_POS_OFFSET, 4);
 
   if(type == binary_log::HEARTBEAT_LOG_EVENT)
   {
-    purged_table();
+    purged_table(); //todo 通过全局参数控制purge是否开启。
+    goto exit_read_event;
   }
 
   if(!received_fde) //还没有收到过FORMAT_DESCRIPTION_EVENT，进行检测。
@@ -453,11 +519,12 @@ int bdq_read_event(Binlog_relay_IO_param *param,
         goto exit_read_event;
       }
       delete glob_description_event;
-      glob_description_event= (Format_description_log_event*) ev;
+      glob_description_event = (Format_description_log_event*) ev;
       received_fde = TRUE;
       bdq_slave.setRecycleBinEnabled(received_fde);
       switch_recycle_bin_status('1');
-      return 0;
+      first_fde = true;
+      goto exit_read_event;
     }
     else
     {
@@ -497,7 +564,7 @@ int bdq_read_event(Binlog_relay_IO_param *param,
     {
       goto exit_read_event;
     }
-    bdq_backup(qe->query,qe->db,home_dir);
+    bdq_backup(qe->query,qe->db,home_dir,last_gtid_event_len);
   }
   else //其它非binary_log::QUERY_EVENT的Drop行为，有吗？
   {
@@ -505,9 +572,11 @@ int bdq_read_event(Binlog_relay_IO_param *param,
   }
 
   exit_read_event:
-  delete ev;
-  ev=NULL;
-
+  if(!first_fde)
+  {
+    delete ev;
+    ev=NULL;
+  }
   return 0;
 }
 
@@ -812,8 +881,6 @@ static bool find_db_tables_should_be_purged(THD *thd, MY_DIR *dirp,
       {
         continue;
       }
-
-      //int8store((char*)(table_list->table_name+time_buf_start_pos+1),table_backup_time);
       table_backup_time = atoll(table_list->table_name + time_buf_start_pos+1);
 
       if(table_backup_time > utime) //未到purge 时间
@@ -873,17 +940,18 @@ bool purge_tables_before_time(THD* thd,st_mysql_const_lex_string db,bool if_exis
   /* See if the directory exists */
   if (!(dirp= my_dir(path,MYF(MY_DONT_SORT))))
   {
-    if (!if_exists)
-    {
-      my_error(ER_DB_DROP_EXISTS, MYF(0), db.str);
-      DBUG_RETURN(true);
-    }
-    else
-    {
-      push_warning_printf(thd, Sql_condition::SL_NOTE,
-                          ER_DB_DROP_EXISTS, ER(ER_DB_DROP_EXISTS), db.str);
-      error= false;
-    }
+//    if (!if_exists)
+//    {
+//      my_error(ER_DB_DROP_EXISTS, MYF(0), db.str);
+//      DBUG_RETURN(true);
+//    }
+//    else
+//    {
+//      push_warning_printf(thd, Sql_condition::SL_NOTE,
+//                          ER_DB_DROP_EXISTS, ER(ER_DB_DROP_EXISTS), db.str);
+//      error= false;
+//    }
+    return FALSE;
   }
 
   if ((error = find_db_tables_should_be_purged(thd, dirp, db.str, path, &tables,
@@ -946,6 +1014,11 @@ bool purged_table()
   st_mysql_const_lex_string db_string;
   db_string.str = recycle_bin_database_name;
   db_string.length = strlen(recycle_bin_database_name);
+
+  if(!bdq_backup_thd)
+  {
+    return true;
+  }
 
   if(purge_tables_before_time(bdq_backup_thd,db_string,true,true,table_should_be_purged_time))
   {
