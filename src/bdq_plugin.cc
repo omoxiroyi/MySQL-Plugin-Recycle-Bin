@@ -498,8 +498,6 @@ int bdq_read_event(Binlog_relay_IO_param *param,
     last_gtid_event_len = tmp_event_len;
   }
 
-  //memcpy(&new_last_master_log_pos, tmp_event_buf + LOG_POS_OFFSET, 4);
-
   if(type == binary_log::HEARTBEAT_LOG_EVENT)
   {
     purged_table(); //todo 通过全局参数控制purge是否开启。
@@ -687,7 +685,7 @@ static MYSQL_SYSVAR_ULONG(check_sql_delay_period,
 
 static MYSQL_SYSVAR_STR(database_name,
         recycle_bin_database_name,
-                        PLUGIN_VAR_OPCMDARG,
+                        PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_MEMALLOC,
                         "recycle bin database name",
                         NULL,
                         NULL,
@@ -731,6 +729,7 @@ static int bdq_plugin_init(void *p)
   {
     return 1;
   }
+  sql_print_information("Install Plugin 'recycle_bin' successfully.");
   glob_description_event= new Format_description_log_event(3);
   return 0;
 }
