@@ -261,3 +261,4 @@ recycle_bin的备份清除等操作不会记录任何binlog信息，保证和mas
 >* 复制必须开启GTID，即MySQL参数`gtid_mode=on`
 >* 支持异步或者半同步复制，对于异步复制来讲，不会影响master的性能，对于半同步复制来讲，对master有5%左右的性能损失。
 >* 可以通过手动drop table的方式清除recycle_bin_dba下的备份表。
+>* 由于备份表的表名格式为原库名_原表名_时间flag_unix时间戳(us)，所以库名+表名最长不能超过（64-16(us)-7(flag)）
