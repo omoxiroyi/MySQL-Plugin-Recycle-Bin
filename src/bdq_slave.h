@@ -89,12 +89,16 @@ private:
 };
 
 
-/* System and status variables for the slave component */
+/* System variables for the recycle_bin plugin */
 extern char recycle_bin_enabled;
 extern unsigned long recycle_bin_trace_level;
 extern unsigned long recycle_bin_expire_seconds;
-extern char recycle_bin_status;
 extern char* recycle_bin_database_name;
 extern unsigned long recycle_bin_check_sql_delay_period;
+
+
+/* System status for the recycle_bin plugin */
+extern char recycle_bin_status;
+extern ulonglong recycle_bin_backup_counter;
 
 #endif /* SEMISYNC_SLAVE_H */
