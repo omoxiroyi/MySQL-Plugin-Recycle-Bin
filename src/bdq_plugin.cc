@@ -52,7 +52,7 @@ bool purged_table();
 
 
 //class Relay_log_info;
-char* this_io_channel_name;
+char* this_io_channel_name = NULL;
 
 bdqSlave bdq_slave;
 static Format_description_log_event*  glob_description_event = NULL;
@@ -472,13 +472,13 @@ int bdq_read_event(Binlog_relay_IO_param *param,
   Log_event *ev= NULL;
   Log_event_type type= binary_log::UNKNOWN_EVENT;
   bool maybe_should_bk = false;
-  const char* tmp_event_buf;
-  unsigned long tmp_event_len;
+  const char* tmp_event_buf = NULL;
+  unsigned long tmp_event_len = 0;
   const char *error_msg= NULL;
   int i=0;
   int len_query = 0;
   bool first_fde = false;
-  this_io_channel_name = strdup(param->channel_name);
+  this_io_channel_name = strdup(param->channel_name); //need to free buffer.
 
 
   if(!recycle_bin_enabled) //如果全局参数没有开启，则直接返回。提高性能。
@@ -575,6 +575,7 @@ int bdq_read_event(Binlog_relay_IO_param *param,
     delete ev;
     ev=NULL;
   }
+  free(this_io_channel_name);
   return 0;
 }
 
