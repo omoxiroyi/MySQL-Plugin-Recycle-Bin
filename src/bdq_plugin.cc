@@ -464,6 +464,94 @@ int bdq_request_dump(Binlog_relay_IO_param *param,
   return 0;
 }
 
+bool construct_query(char** query,const char* buf,unsigned int event_len,
+                     const Format_description_event *description_event,
+                     Log_event_type event_type)
+{
+  bool res = false;
+  uint32_t tmp;
+  uint8_t common_header_len, post_header_len;
+  Log_event_header::Byte *start;
+  const Log_event_header::Byte *end;
+  uint64_t query_data_written = 0;
+
+  unsigned long data_len;
+  size_t db_len;
+  uint16_t status_vars_len;
+
+
+  common_header_len= description_event->common_header_len;
+  post_header_len= description_event->post_header_len[event_type - 1];
+
+  if (event_len < (unsigned int)(common_header_len + post_header_len))
+  {
+    res = false;
+    goto exit_construct_query;
+  }
+  data_len= event_len - (common_header_len + post_header_len);
+//  memcpy(&thread_id, buf + Q_THREAD_ID_OFFSET, sizeof(thread_id));
+//  thread_id= le32toh(thread_id);
+//  memcpy(&query_exec_time, buf + Q_EXEC_TIME_OFFSET, sizeof(query_exec_time));
+//  query_exec_time= le32toh(query_exec_time);
+
+  db_len= (unsigned char)buf[binary_log::Query_event::Q_DB_LEN_OFFSET];
+
+//  memcpy(&error_code, buf + Q_ERR_CODE_OFFSET, sizeof(error_code));
+//  error_code= le16toh(error_code);
+  tmp= post_header_len - binary_log::Binary_log_event::QUERY_HEADER_MINIMAL_LEN;
+
+  if (tmp)
+  {
+
+    memcpy(&status_vars_len, buf + binary_log::Query_event::Q_STATUS_VARS_LEN_OFFSET,
+           sizeof(status_vars_len));
+    status_vars_len= le16toh(status_vars_len);
+    /*
+      Check if status variable length is corrupt and will lead to very
+      wrong data. We could be even more strict and require data_len to
+      be even bigger, but this will suffice to catch most corruption
+      errors that can lead to a crash.
+    */
+    if (status_vars_len >
+        std::min<unsigned long>(data_len, MAX_SIZE_LOG_EVENT_STATUS))
+    {
+      query= 0;
+      res = false;
+      goto exit_construct_query;
+    }
+    data_len-= status_vars_len;
+    tmp-= 2;
+  }
+  else
+  {
+    /*
+      server version < 5.0 / binlog_version < 4 master's event is
+      relay-logged with storing the original size of the event in
+      Q_MASTER_DATA_WRITTEN_CODE status variable.
+      The size is to be restored at reading Q_MASTER_DATA_WRITTEN_CODE-marked
+      event from the relay log.
+    */
+    size_t master_data_written;
+    BAPI_ASSERT(description_event->binlog_version < 4);
+    //master_data_written= data_written;
+  }
+
+  start= (Log_event_header::Byte*) (buf + post_header_len);
+  end= (const Log_event_header::Byte*) (start + status_vars_len);
+  *query= (char *)(end + db_len + 1);
+
+  if(strlen(*query))
+  {
+    res = true;
+  }
+  else
+  {
+    res = false;
+  }
+
+  exit_construct_query:
+  return  res;
+}
 
 int bdq_read_event(Binlog_relay_IO_param *param,
 			       const char *packet, unsigned long len,
@@ -478,14 +566,14 @@ int bdq_read_event(Binlog_relay_IO_param *param,
   int i=0;
   int len_query = 0;
   bool first_fde = false;
-  this_io_channel_name = strdup(param->channel_name); //need to free buffer.
+
 
 
   if(!recycle_bin_enabled) //如果全局参数没有开启，则直接返回。提高性能。
   {
     goto exit_read_event;
   }
-
+  this_io_channel_name = strdup(param->channel_name); //need to free buffer.
   bdq_slave.semisync_event(packet, len,
                                           &tmp_event_buf, &tmp_event_len);
   type = (Log_event_type)tmp_event_buf[EVENT_TYPE_OFFSET];
