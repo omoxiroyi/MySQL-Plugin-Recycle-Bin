@@ -173,7 +173,7 @@ void bdq_after_execute_command(THD* bdq_backup_thd)
   bdq_backup_thd->reset_db(NULL_CSTR);
   bdq_backup_thd->reset_query();
   bdq_backup_thd->proc_info= 0;
-  free_root(bdq_backup_thd->mem_root,MYF(MY_KEEP_PREALLOC));
+  //free_root(bdq_backup_thd->mem_root,MYF(MY_KEEP_PREALLOC));
 }
 
 bool wait_for_sql_thread(ulonglong back_len)
@@ -188,7 +188,7 @@ bool wait_for_sql_thread(ulonglong back_len)
     }
   }
   new_last_master_log_pos -=back_len;
-  while(recycle_bin_enabled)
+  while(recycle_bin_enabled && !mi->abort_slave)
   {
     if(mi->rli->get_group_master_log_pos() >= new_last_master_log_pos &&
                           strncmp(new_last_master_log_file_name,mi->rli->get_group_master_log_name(),
@@ -254,6 +254,7 @@ my_bool bdq_backup_table_routine(const char* table_dropped_name,const char* db,
     }
     res= mysql_create_db(bdq_backup_thd,(lower_case_table_names == 2 ? alias :
                                              lex->name.str), &create_info, 0);
+    alias = NULL;
     bdq_after_execute_command(bdq_backup_thd);
 
     if(res)
@@ -454,6 +455,9 @@ my_bool bdq_backup(const char* drop_query,const char* db,const char* backup_dir,
       break;
     }
   }
+
+  free(in_db);
+  in_db = NULL;
   return TRUE;
 }
 
@@ -587,6 +591,7 @@ int bdq_read_event(Binlog_relay_IO_param *param,
 
   //如果全局参数没有开启，则直接返回。在发现recycle_bin插件存在安全问题时，可以通过此参数紧急关闭recycle_bin的功能。
   //mysql>set global recycle_bin_enabled=off;
+
   if(!recycle_bin_enabled)
   {
     goto exit_read_event;
@@ -674,6 +679,7 @@ int bdq_read_event(Binlog_relay_IO_param *param,
     ev=NULL;
   }
   free(this_io_channel_name);
+  this_io_channel_name = NULL;
   delete[] query;
   delete[] database;
   return 0;
@@ -697,12 +703,13 @@ int bdq_io_start(Binlog_relay_IO_param *param)
 int bdq_io_end(Binlog_relay_IO_param *param)
 {
   //Nothing to do.
+  bdq_backup_thd = NULL;
   return 0;
 }
 
 int bdq_sql_stop(Binlog_relay_IO_param *param, bool aborted)
 {
-  bdq_backup_thd = NULL;
+
   return 0;
 }
 
