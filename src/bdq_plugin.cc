@@ -471,7 +471,7 @@ int bdq_read_event(Binlog_relay_IO_param *param,
 {
   Log_event *ev= NULL;
   Log_event_type type= binary_log::UNKNOWN_EVENT;
-  bool maybe_should_bk = false;
+  //bool maybe_should_bk = false;
   const char* tmp_event_buf = NULL;
   unsigned long tmp_event_len = 0;
   const char *error_msg= NULL;
@@ -543,28 +543,29 @@ int bdq_read_event(Binlog_relay_IO_param *param,
       sql_print_error("Could not construct log event object: %s", error_msg);
     }
     Query_log_event* qle = dynamic_cast<Query_log_event*>(ev);
-    binary_log::Query_event* qe = new Query_log_event;
-    qe = qle;
+     //find substr "DROP",that maybe should bk.
+//    len_query=strlen(qle->query);
+//    for(i=0;i<len_query;i++)
+//    {
+//      if(strncasecmp(qle->query+i,"DROP",4) ==0 )
+//      {
+//        maybe_should_bk = true;
+//        break;
+//      }
+//    }
 
-
-    //find substr "DROP",that maybe should bk.
-    len_query=strlen(qe->query);
-    for(i=0;i<len_query;i++)
+    if(strncasecmp(qle->query,"DROP",4) ==0 )
     {
-      if(strncasecmp(qe->query+i,"DROP",4) ==0 )
-      {
-        maybe_should_bk = true;
-        break;
-      }
+      //maybe_should_bk = true;
+      bdq_backup(qle->query,qle->db,home_dir,last_gtid_event_len);
     }
-
-    if(!maybe_should_bk)
+    else
     {
+      //maybe_should_bk = false;
       goto exit_read_event;
     }
-    bdq_backup(qe->query,qe->db,home_dir,last_gtid_event_len);
   }
-  else //其它非binary_log::QUERY_EVENT的Drop行为，有吗？
+  else //其它非binary_log::QUERY_EVENT的Drop行为，在5.7的版本中是没有的，如果有，算是recycle_bin的bug.
   {
     goto exit_read_event;
   }
@@ -1031,4 +1032,6 @@ bool purged_table()
   {
     sql_print_error("purged tables failed");
   }
+
+  return true;
 }
