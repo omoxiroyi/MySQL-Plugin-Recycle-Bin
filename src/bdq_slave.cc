@@ -19,11 +19,15 @@
 #include "debug_sync.h"
 
 char recycle_bin_enabled;
-char recycle_bin_status= 0;
 unsigned long recycle_bin_trace_level;
 unsigned long recycle_bin_expire_seconds;
 char* recycle_bin_database_name;
 unsigned long recycle_bin_check_sql_delay_period;
+
+
+
+char recycle_bin_status= 0;
+ulonglong recycle_bin_backup_counter = 0;
 
 int bdqSlave::initObject()
 {
@@ -44,6 +48,14 @@ int bdqSlave::initObject()
   return result;
 }
 
+/**
+ *
+ * @param header
+ * @param total_len
+ * @param payload
+ * @param payload_len
+ * @return
+ */
 int bdqSlave::semisync_event(const char *header,
                              unsigned long total_len,
                              const char **payload,
@@ -71,6 +83,7 @@ int bdqSlave::slaveStart(Binlog_relay_IO_param *param)
   return 0;
 }
 
+
 int bdqSlave::slaveStop(Binlog_relay_IO_param *param)
 {
   if (recycle_bin_status)
@@ -80,57 +93,4 @@ int bdqSlave::slaveStop(Binlog_relay_IO_param *param)
   mysql_reply= 0;
   return 0;
 }
-
-//int bdqSlave::slaveReply(MYSQL *mysql,
-//                                 const char *binlog_filename,
-//                                 my_off_t binlog_filepos)
-//{
-//  const char *kWho = "ReplSemiSyncSlave::slaveReply";
-//  NET *net= &mysql->net;
-//  uchar reply_buffer[REPLY_MAGIC_NUM_LEN
-//                     + REPLY_BINLOG_POS_LEN
-//                     + REPLY_BINLOG_NAME_LEN];
-//  int reply_res;
-//  size_t name_len = strlen(binlog_filename);
-//
-//  function_enter(kWho);
-//
-//  DBUG_EXECUTE_IF("rpl_semisync_before_send_ack",
-//                  {
-//                    const char act[]=
-//                      "now SIGNAL sending_ack WAIT_FOR continue";
-//                    DBUG_ASSERT(opt_debug_sync_timeout > 0);
-//                    DBUG_ASSERT(!debug_sync_set_action(current_thd,
-//                                                       STRING_WITH_LEN(act)));
-//                  };);
-//
-//  /* Prepare the buffer of the reply. */
-//  reply_buffer[REPLY_MAGIC_NUM_OFFSET] = kPacketMagicNum;
-//  int8store(reply_buffer + REPLY_BINLOG_POS_OFFSET, binlog_filepos);
-//  memcpy(reply_buffer + REPLY_BINLOG_NAME_OFFSET,
-//         binlog_filename,
-//         name_len + 1 /* including trailing '\0' */);
-//
-//  if (trace_level_ & kTraceDetail)
-//    sql_print_information("%s: reply (%s, %lu)", kWho,
-//                          binlog_filename, (ulong)binlog_filepos);
-//
-//  net_clear(net, 0);
-//  /* Send the reply. */
-//  reply_res = my_net_write(net, reply_buffer,
-//                           name_len + REPLY_BINLOG_NAME_OFFSET);
-//  if (!reply_res)
-//  {
-//    reply_res = net_flush(net);
-//    if (reply_res)
-//      sql_print_error("Semi-sync slave net_flush() reply failed");
-//  }
-//  else
-//  {
-//    sql_print_error("Semi-sync slave send reply failed: %s (%d)",
-//                    net->last_error, net->last_errno);
-//  }
-//
-//  return function_exit(kWho, reply_res);
-//}
 

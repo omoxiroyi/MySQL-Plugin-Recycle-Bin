@@ -269,7 +269,7 @@ my_bool bdq_backup_table_routine(const char* table_dropped_name,const char* db,
     backup_complete = FALSE;
     goto exit_bdq_btr;
   }
-  //stage 3.rename A.a for backup.
+  //stage 4.rename A.a for backup.
   sprintf(query_rename_table,"RENAME TABLE `%s`.`%s` to `%s`.`%s_%s_%s_%s`",
           db,table_dropped_name,
           recycle_bin_database_name,db,table_dropped_name,recycle_bin_time_flag,my_timestamp);
@@ -304,7 +304,7 @@ my_bool bdq_backup_table_routine(const char* table_dropped_name,const char* db,
 
   //在数据库层执行完rename之后就是已经完成备份操作了，但是如果stage 4出错的话，可能会影响复制的SQL线程正常回放。
   backup_complete = TRUE;
-  //stage 4.create A.a(id int not null auto_increment primary key);
+  //stage 5.create A.a(id int not null auto_increment primary key);
   sprintf(query_create_virtual_table,
           "CREATE TABLE %s.%s(id int not null auto_increment primary key)ENGINE=INNODB",db,table_dropped_name);
   if(bdq_prepare_execute_command(bdq_backup_thd,query_create_virtual_table,db,table_dropped_name))
@@ -426,6 +426,7 @@ my_bool bdq_backup(const char* drop_query,const char* db,const char* backup_dir,
       sql_print_information("Master drop table %s.%s",in_db,in_table);
       if(bdq_backup_table_routine(in_table,in_db,backup_dir,bdq_backup_thd,back_len))
       {
+        recycle_bin_backup_counter++;
         sql_print_information("Backup table %s.%s successfully.",in_db,in_table);
       }
       else
@@ -555,6 +556,15 @@ static size_t get_db_query_from_event_buf(const char *buf, size_t length,
   return 0;
 }
 
+/**
+ *
+ * @param param io thread input some variables.
+ * @param packet net packet.
+ * @param len  net packet len
+ * @param event_buf event buf pointer
+ * @param event_len event buffer len
+ * @return 0 successfully;others failed.
+ */
 
 int bdq_read_event(Binlog_relay_IO_param *param,
 			       const char *packet, unsigned long len,
@@ -569,13 +579,14 @@ int bdq_read_event(Binlog_relay_IO_param *param,
   char* query = NULL;
   char* database = NULL;
 
-
-
-  if(!recycle_bin_enabled) //如果全局参数没有开启，则直接返回。提高性能。
+  //如果全局参数没有开启，则直接返回。在发现recycle_bin插件存在安全问题时，可以通过此参数紧急关闭recycle_bin的功能。
+  //mysql>set global recycle_bin_enabled=off;
+  if(!recycle_bin_enabled)
   {
     goto exit_read_event;
   }
-  this_io_channel_name = strdup(param->channel_name); //need to free buffer.
+
+  this_io_channel_name = strdup(param->channel_name); //need to free buffer.(exit_read_event)
   bdq_slave.semisync_event(packet, len,
                                           &tmp_event_buf, &tmp_event_len);
   type = (Log_event_type)tmp_event_buf[EVENT_TYPE_OFFSET];
@@ -626,24 +637,6 @@ int bdq_read_event(Binlog_relay_IO_param *param,
   if(type == binary_log::QUERY_EVENT)
   {
 
-
-
-//    if(!construct_query(&query,&db,tmp_event_buf,tmp_event_len-4,glob_description_event,type))
-//    {
-//      sql_print_error("Read QUERY_EVENT failed");
-//      goto exit_read_event;
-//    }
-
-//    size_t query_len = Query_log_event::get_query(tmp_event_buf, tmp_event_len, glob_description_event, &query);
-//    int tmp_len = strlen(query);
-//    if(!query_len)
-//    {
-//      sql_print_error("Read QUERY_EVENT failed");
-//      goto exit_read_event;
-//    }
-//
-//    char* my_query = new char[query_len];
-//    memcpy(my_query,query,query_len);
     if(!get_db_query_from_event_buf(tmp_event_buf,tmp_event_len,glob_description_event,&query,&database))
     {
       goto exit_read_event;
@@ -658,36 +651,6 @@ int bdq_read_event(Binlog_relay_IO_param *param,
       goto exit_read_event;
     }
 
-//    if (!(ev= Log_event::read_log_event((const char*)tmp_event_buf ,
-//                                        tmp_event_len, &error_msg,
-//                                        glob_description_event,
-//                                        opt_verify_binlog_checksum)))
-//    {
-//      sql_print_error("Could not construct log event object: %s", error_msg);
-//    }
-//    Query_log_event* qle = dynamic_cast<Query_log_event*>(ev);
-
-    // find substr "DROP",that maybe should bk.
-//    len_query=strlen(qle->query);
-//    for(i=0;i<len_query;i++)
-//    {
-//      if(strncasecmp(qle->query+i,"DROP",4) ==0 )
-//      {
-//        maybe_should_bk = true;
-//        break;
-//      }
-//    }
-
-//    if(strncasecmp(query,"DROP",4) ==0 )
-//    {
-//      //maybe_should_bk = true;
-//      bdq_backup(qle->query,qle->db,home_dir,last_gtid_event_len);
-//    }
-//    else
-//    {
-//      //maybe_should_bk = false;
-//      goto exit_read_event;
-//    }
   }
   else //其它非binary_log::QUERY_EVENT的Drop行为，在5.7的版本中是没有的，如果有，算是recycle_bin的bug.
   {
@@ -834,8 +797,11 @@ static SYS_VAR* bdq_system_vars[]= {
 static SHOW_VAR bdq_status_vars[]= {
   {"Recycle_bin_status",
    (char*) &recycle_bin_status, SHOW_BOOL, SHOW_SCOPE_GLOBAL},
+  {"Recycle_bin_backup_counter",
+   (char*)&recycle_bin_backup_counter,SHOW_LONG,SHOW_SCOPE_GLOBAL},
   {NULL, NULL, SHOW_BOOL, SHOW_SCOPE_GLOBAL},
 };
+
 
 Binlog_relay_IO_observer bdq_relay_io_observer = {
   sizeof(Binlog_relay_IO_observer), // len
@@ -858,6 +824,8 @@ static int bdq_plugin_init(void *p)
     return 1;
   }
   sql_print_information("Install Plugin 'recycle_bin' successfully.");
+
+  //bdq_plugin_deinit delete it;bdq_read_event update it.
   glob_description_event= new Format_description_log_event(3);
   return 0;
 }
