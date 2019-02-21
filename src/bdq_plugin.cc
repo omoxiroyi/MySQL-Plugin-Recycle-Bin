@@ -170,6 +170,10 @@ void bdq_after_execute_command(THD* bdq_backup_thd)
   close_thread_tables(bdq_backup_thd);
   bdq_backup_thd->end_statement();
   bdq_backup_thd->cleanup_after_query();
+  bdq_backup_thd->reset_db(NULL_CSTR);
+  bdq_backup_thd->reset_query();
+  bdq_backup_thd->proc_info= 0;
+  free_root(bdq_backup_thd->mem_root,MYF(MY_KEEP_PREALLOC));
 }
 
 bool wait_for_sql_thread(ulonglong back_len)
@@ -224,6 +228,8 @@ my_bool bdq_backup_table_routine(const char* table_dropped_name,const char* db,
   //stage 1.改变当前线程的sql_log_bin = 0;不写binlog操作。
 
   bdq_backup_thd->variables.sql_log_bin = FALSE;
+  //bdq_backup_thd->lex->unit->thd = bdq_backup_thd;
+
   if (bdq_backup_thd->variables.sql_log_bin)
   {
     bdq_backup_thd->variables.option_bits |= OPTION_BIN_LOG;
@@ -585,6 +591,10 @@ int bdq_read_event(Binlog_relay_IO_param *param,
   {
     goto exit_read_event;
   }
+  if(!bdq_backup_thd)
+  {
+    bdq_backup_thd = (THD*)my_get_thread_local(THR_THD);
+  }
 
   this_io_channel_name = strdup(param->channel_name); //need to free buffer.(exit_read_event)
   bdq_slave.semisync_event(packet, len,
@@ -680,7 +690,6 @@ int bdq_queue_event(Binlog_relay_IO_param *param,
 
 int bdq_io_start(Binlog_relay_IO_param *param)
 {
-  //Nothing to do.
   bdq_backup_thd = (THD*)my_get_thread_local(THR_THD);
   return 0;
 }
@@ -693,6 +702,7 @@ int bdq_io_end(Binlog_relay_IO_param *param)
 
 int bdq_sql_stop(Binlog_relay_IO_param *param, bool aborted)
 {
+  bdq_backup_thd = NULL;
   return 0;
 }
 
