@@ -464,94 +464,97 @@ int bdq_request_dump(Binlog_relay_IO_param *param,
   return 0;
 }
 
-bool construct_query(char** query,const char* buf,unsigned int event_len,
-                     const Format_description_event *description_event,
-                     Log_event_type event_type)
+
+
+/**
+   Return the query string pointer (and its size) from a Query log event
+   using only the event buffer (we don't instantiate a Query_log_event
+   object for this).
+
+   @param buf               Pointer to the event buffer.
+   @param length            The size of the event buffer.
+   @param description_event The description event of the master which logged
+                            the event.
+   @param[out] query        The pointer to receive the query pointer.
+
+   @return                  The size of the query.
+*/
+static size_t get_db_query_from_event_buf(const char *buf, size_t length,
+                                  const Format_description_log_event *fd_event,
+                                  char** query,char** db)
 {
-  bool res = false;
-  uint32_t tmp;
-  uint8_t common_header_len, post_header_len;
-  Log_event_header::Byte *start;
-  const Log_event_header::Byte *end;
-  uint64_t query_data_written = 0;
+  DBUG_ASSERT((Log_event_type)buf[EVENT_TYPE_OFFSET] ==
+              binary_log::QUERY_EVENT);
 
-  unsigned long data_len;
-  size_t db_len;
-  uint16_t status_vars_len;
+  uint db_len;                                  /* size of db name */
+  uint status_vars_len= 0;                      /* size of status_vars */
+  size_t qlen;                                  /* size of the query */
+  int checksum_size= 0;                         /* size of trailing checksum */
+  const char *end_of_query = NULL;
+  const char* query_start = NULL;
+  const char* db_name_start = NULL;
 
 
-  common_header_len= description_event->common_header_len;
-  post_header_len= description_event->post_header_len[event_type - 1];
+  uint common_header_len= fd_event->common_header_len;
+  uint query_header_len= fd_event->post_header_len[binary_log::QUERY_EVENT-1];
 
-  if (event_len < (unsigned int)(common_header_len + post_header_len))
+  /* Error if the event content is too small */
+  if (length < (common_header_len + query_header_len))
+    goto err;
+
+  /* Skip the header */
+  buf+= common_header_len;
+
+  /* Check if there are status variables in the event */
+  if ((query_header_len - binary_log::Binary_log_event::QUERY_HEADER_MINIMAL_LEN) > 0)
   {
-    res = false;
-    goto exit_construct_query;
+    status_vars_len= uint2korr(buf + binary_log::Query_event::Q_STATUS_VARS_LEN_OFFSET);
   }
-  data_len= event_len - (common_header_len + post_header_len);
-//  memcpy(&thread_id, buf + Q_THREAD_ID_OFFSET, sizeof(thread_id));
-//  thread_id= le32toh(thread_id);
-//  memcpy(&query_exec_time, buf + Q_EXEC_TIME_OFFSET, sizeof(query_exec_time));
-//  query_exec_time= le32toh(query_exec_time);
 
-  db_len= (unsigned char)buf[binary_log::Query_event::Q_DB_LEN_OFFSET];
+  /* Check if the event has trailing checksum */
+  if (fd_event->common_footer->checksum_alg != binary_log::BINLOG_CHECKSUM_ALG_OFF)
+    checksum_size= 4;
 
-//  memcpy(&error_code, buf + Q_ERR_CODE_OFFSET, sizeof(error_code));
-//  error_code= le16toh(error_code);
-  tmp= post_header_len - binary_log::Binary_log_event::QUERY_HEADER_MINIMAL_LEN;
+  db_len= (uint)buf[binary_log::Query_event::Q_DB_LEN_OFFSET];
 
-  if (tmp)
+  /* Error if the event content is too small */
+  if (length < (common_header_len + query_header_len +
+                db_len + 1 + status_vars_len + checksum_size))
+    goto err;
+
+  query_start= buf + query_header_len + db_len + 1 + status_vars_len;
+
+  /* Calculate the query length */
+  end_of_query= buf + (length - common_header_len) - /* we skipped the header */
+                checksum_size;
+  qlen= end_of_query - query_start;
+  if(qlen)
   {
-
-    memcpy(&status_vars_len, buf + binary_log::Query_event::Q_STATUS_VARS_LEN_OFFSET,
-           sizeof(status_vars_len));
-    status_vars_len= le16toh(status_vars_len);
-    /*
-      Check if status variable length is corrupt and will lead to very
-      wrong data. We could be even more strict and require data_len to
-      be even bigger, but this will suffice to catch most corruption
-      errors that can lead to a crash.
-    */
-    if (status_vars_len >
-        std::min<unsigned long>(data_len, MAX_SIZE_LOG_EVENT_STATUS))
-    {
-      query= 0;
-      res = false;
-      goto exit_construct_query;
-    }
-    data_len-= status_vars_len;
-    tmp-= 2;
+    *query = new char[qlen];
+    memcpy(*query,query_start,qlen);
+    (*query)[qlen] = '\0';
   }
   else
   {
-    /*
-      server version < 5.0 / binlog_version < 4 master's event is
-      relay-logged with storing the original size of the event in
-      Q_MASTER_DATA_WRITTEN_CODE status variable.
-      The size is to be restored at reading Q_MASTER_DATA_WRITTEN_CODE-marked
-      event from the relay log.
-    */
-    size_t master_data_written;
-    BAPI_ASSERT(description_event->binlog_version < 4);
-    //master_data_written= data_written;
+    goto err;
   }
 
-  start= (Log_event_header::Byte*) (buf + post_header_len);
-  end= (const Log_event_header::Byte*) (start + status_vars_len);
-  *query= (char *)(end + db_len + 1);
-
-  if(strlen(*query))
+  db_name_start = buf + query_header_len + status_vars_len;
+  if(db_len)
   {
-    res = true;
-  }
-  else
-  {
-    res = false;
+    *db = new char[db_len];
+    memcpy(*db,db_name_start,db_len);
+    (*db)[db_len] = '\0';
   }
 
-  exit_construct_query:
-  return  res;
+  return qlen;
+
+  err:
+  *query= NULL;
+  *db = NULL;
+  return 0;
 }
+
 
 int bdq_read_event(Binlog_relay_IO_param *param,
 			       const char *packet, unsigned long len,
@@ -559,13 +562,12 @@ int bdq_read_event(Binlog_relay_IO_param *param,
 {
   Log_event *ev= NULL;
   Log_event_type type= binary_log::UNKNOWN_EVENT;
-  //bool maybe_should_bk = false;
   const char* tmp_event_buf = NULL;
   unsigned long tmp_event_len = 0;
   const char *error_msg= NULL;
-  int i=0;
-  int len_query = 0;
   bool first_fde = false;
+  char* query = NULL;
+  char* database = NULL;
 
 
 
@@ -623,15 +625,49 @@ int bdq_read_event(Binlog_relay_IO_param *param,
   //已经收到了FORMAT_DESCRIPTION_EVENT，再对event type进行判断,是否可能需要备份。
   if(type == binary_log::QUERY_EVENT)
   {
-    if (!(ev= Log_event::read_log_event((const char*)tmp_event_buf ,
-                                        tmp_event_len, &error_msg,
-                                        glob_description_event,
-                                        opt_verify_binlog_checksum)))
+
+
+
+//    if(!construct_query(&query,&db,tmp_event_buf,tmp_event_len-4,glob_description_event,type))
+//    {
+//      sql_print_error("Read QUERY_EVENT failed");
+//      goto exit_read_event;
+//    }
+
+//    size_t query_len = Query_log_event::get_query(tmp_event_buf, tmp_event_len, glob_description_event, &query);
+//    int tmp_len = strlen(query);
+//    if(!query_len)
+//    {
+//      sql_print_error("Read QUERY_EVENT failed");
+//      goto exit_read_event;
+//    }
+//
+//    char* my_query = new char[query_len];
+//    memcpy(my_query,query,query_len);
+    if(!get_db_query_from_event_buf(tmp_event_buf,tmp_event_len,glob_description_event,&query,&database))
     {
-      sql_print_error("Could not construct log event object: %s", error_msg);
+      goto exit_read_event;
     }
-    Query_log_event* qle = dynamic_cast<Query_log_event*>(ev);
-     //find substr "DROP",that maybe should bk.
+
+    if(strncasecmp(query,"DROP",4) ==0 && database)
+    {
+      bdq_backup(query,database,home_dir,last_gtid_event_len);
+    }
+    else
+    {
+      goto exit_read_event;
+    }
+
+//    if (!(ev= Log_event::read_log_event((const char*)tmp_event_buf ,
+//                                        tmp_event_len, &error_msg,
+//                                        glob_description_event,
+//                                        opt_verify_binlog_checksum)))
+//    {
+//      sql_print_error("Could not construct log event object: %s", error_msg);
+//    }
+//    Query_log_event* qle = dynamic_cast<Query_log_event*>(ev);
+
+    // find substr "DROP",that maybe should bk.
 //    len_query=strlen(qle->query);
 //    for(i=0;i<len_query;i++)
 //    {
@@ -642,16 +678,16 @@ int bdq_read_event(Binlog_relay_IO_param *param,
 //      }
 //    }
 
-    if(strncasecmp(qle->query,"DROP",4) ==0 )
-    {
-      //maybe_should_bk = true;
-      bdq_backup(qle->query,qle->db,home_dir,last_gtid_event_len);
-    }
-    else
-    {
-      //maybe_should_bk = false;
-      goto exit_read_event;
-    }
+//    if(strncasecmp(query,"DROP",4) ==0 )
+//    {
+//      //maybe_should_bk = true;
+//      bdq_backup(qle->query,qle->db,home_dir,last_gtid_event_len);
+//    }
+//    else
+//    {
+//      //maybe_should_bk = false;
+//      goto exit_read_event;
+//    }
   }
   else //其它非binary_log::QUERY_EVENT的Drop行为，在5.7的版本中是没有的，如果有，算是recycle_bin的bug.
   {
@@ -665,6 +701,8 @@ int bdq_read_event(Binlog_relay_IO_param *param,
     ev=NULL;
   }
   free(this_io_channel_name);
+  delete[] query;
+  delete[] database;
   return 0;
 }
 
@@ -874,7 +912,7 @@ static bool find_db_tables_should_be_purged(THD *thd, MY_DIR *dirp,
                                               TABLE_LIST **tables,
                                               bool *found_other_files,ulonglong utime)
 {
-  char filePath[FN_REFLEN];
+//  char filePath[FN_REFLEN];
   TABLE_LIST *tot_list=0, **tot_list_next_local, **tot_list_next_global;
   DBUG_ENTER("find_db_tables_and_rm_known_files");
   DBUG_PRINT("enter",("path: %s", path));
@@ -962,7 +1000,7 @@ static bool find_db_tables_should_be_purged(THD *thd, MY_DIR *dirp,
                        table_list->table_name, MDL_EXCLUSIVE,
                        MDL_TRANSACTION);
 
-      int time_buf_start_pos =0;
+      size_t time_buf_start_pos =0;
       for(;time_buf_start_pos < table_list->table_name_length;time_buf_start_pos++)
       {
         if(strncasecmp(table_list->table_name+time_buf_start_pos,
