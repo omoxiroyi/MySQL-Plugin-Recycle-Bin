@@ -256,4 +256,8 @@ Master_SSL_Verify_Server_Cert: No
 ```
 recycle_bin的备份清除等操作不会记录任何binlog信息，保证和master的GTID一致。
 
-## 使用限制说明
+## 其它使用说明
+
+>* 复制必须开启GTID，即MySQL参数`gtid_mode=on`
+>* 支持异步或者半同步复制，对于异步复制来讲，不会影响master的性能，对于半同步复制来讲，对master有5%左右的性能损失。
+>* 可以通过手动drop table的方式清除recycle_bin_dba下的备份表。
