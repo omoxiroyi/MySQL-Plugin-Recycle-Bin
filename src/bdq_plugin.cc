@@ -30,7 +30,6 @@
 #include "sql_rename.h"
 #include "sql_db.h"
 #include "sql_table.h"
-#include "bdq_purger.h"
 #include "mysys_err.h"
 #include "my_byteorder.h"
 #include "rpl_msr.h"
@@ -66,8 +65,8 @@ static const char recycle_bin_time_flag[] = "ashesun";
 ulonglong new_last_master_log_pos = 0;
 ulonglong wait_for_master_log_pos = 0;
 
-char* new_last_master_log_file_name;
-char* wait_for_master_log_file_name;
+char* new_last_master_log_file_name = NULL;
+char* wait_for_master_log_file_name = NULL;
 
 static ulonglong last_gtid_event_len = 0;
 
@@ -582,7 +581,7 @@ int bdq_read_event(Binlog_relay_IO_param *param,
 {
   Log_event *ev= NULL;
   Log_event_type type= binary_log::UNKNOWN_EVENT;
-  const char* tmp_event_buf = NULL;
+  const char* tmp_event_buf = NULL; //no need to free.
   unsigned long tmp_event_len = 0;
   const char *error_msg= NULL;
   bool first_fde = false;
@@ -673,15 +672,26 @@ int bdq_read_event(Binlog_relay_IO_param *param,
   }
 
   exit_read_event:
+
   if(!first_fde)
   {
     delete ev;
     ev=NULL;
   }
-  free(this_io_channel_name);
-  this_io_channel_name = NULL;
+
+  if(this_io_channel_name)
+  {
+    free(this_io_channel_name);
+    this_io_channel_name = NULL;
+  }
   delete[] query;
   delete[] database;
+  delete[] error_msg;
+  if(new_last_master_log_file_name)
+  {
+    free(new_last_master_log_file_name);
+    new_last_master_log_file_name = NULL;
+  }
   return 0;
 }
 
