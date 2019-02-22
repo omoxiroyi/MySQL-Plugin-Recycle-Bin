@@ -605,9 +605,6 @@ int bdq_read_event(Binlog_relay_IO_param *param,
                                           &tmp_event_buf, &tmp_event_len);
   type = (Log_event_type)tmp_event_buf[EVENT_TYPE_OFFSET];
 
-  new_last_master_log_pos = param->master_log_pos;
-  new_last_master_log_file_name = strdup(param->master_log_name);
-
   if(type == binary_log::GTID_LOG_EVENT)
   {
     last_gtid_event_len = tmp_event_len;
@@ -658,6 +655,8 @@ int bdq_read_event(Binlog_relay_IO_param *param,
 
     if(strncasecmp(query,"DROP",4) ==0 && database)
     {
+      new_last_master_log_pos = param->master_log_pos;
+      new_last_master_log_file_name = strdup(param->master_log_name);
       bdq_backup(query,database,home_dir,last_gtid_event_len);
     }
     else
