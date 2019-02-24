@@ -8,7 +8,9 @@ recycle_bin是一款MySQL插件，可以在不修改任何MySQL代码的情况�
 recycle_bin并不直接作用于master，而是工作在主从环境中的从机上，当通过程序或者人为在master上进行drop table操作时，slave会拦截drop操作，
 先进行数据备份，再进行删除操作。当备份文件超过保存时间后，recycle_bin会自动清除这些备份数据。
 
+欢迎加入MySQL内核交流群
 
+![QQ群](./doc/img/recycle_bin.png)
 
 ## 二、Recycle_bin详细说明
 
