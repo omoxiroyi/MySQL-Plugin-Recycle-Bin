@@ -73,7 +73,6 @@ static ulonglong last_gtid_event_len = 0;
 ulonglong make_recycle_bin_iso8601_timestamp(char *buf, ulonglong utime = 0)
 {
   struct tm  my_tm;
-//  char       tzinfo[7]="Z";  // max 6 chars plus \0
   size_t     len;
   time_t     seconds;
 
