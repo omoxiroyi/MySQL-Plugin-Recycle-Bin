@@ -21,16 +21,16 @@ recycle_bin并不直接作用于master，而是工作在主从环境中的从机
 git clone git@github.com:sunashe/MySQL-Plugin-Recycle-Bin.git
 cp -r MySQL-Plugin-Recycle-Bin  mysql_source_dir/plugin/
 cd mysql_source_dir
-cmake . -DBUILD_CONFIG=mysql_release
+cmake . -DBUILD_CONFIG=mysql_release -DDOWNLOAD_BOOST=1  -DWITH_BOOST=/usr/local/boost/
 cd plugin/MySQL-Plugin-Recycle-Bin
 make 
 #拷贝当前目录下的recycle_bin.so到MySQL中配置的plugin_dir下。
 ```
 
-#### 直接下载plugin插件
+#### 下载编译好的lib文件
 ```bash
-wget 
-
+下载页面
+https://github.com/sunashe/MySQL-Plugin-Recycle-Bin/releases
 ```
 
 #### 安装插件
