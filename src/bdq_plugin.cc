@@ -83,40 +83,14 @@ ulonglong make_recycle_bin_iso8601_timestamp(char *buf, ulonglong utime = 0)
   utime = utime % 1000000;
 
   if (opt_log_timestamps == 0)
+  {
     gmtime_r(&seconds, &my_tm);
+  }
   else
   {
     localtime_r(&seconds, &my_tm);
-
-//#ifdef __FreeBSD__
-//    /*
-//      The field tm_gmtoff is the offset (in seconds) of the time represented
-//      from UTC, with positive values indicating east of the Prime Meridian.
-//    */
-//    long tim= -my_tm.tm_gmtoff;
-//#elif _WIN32
-//    long tim = _timezone;
-//#else
-//    long tim= timezone; // seconds West of UTC.
-//#endif
-//    char dir= '-';
-//
-//    if (tim < 0)
-//    {
-//      dir= '+';
-//      tim= -tim;
-//    }
-//    my_snprintf(tzinfo, sizeof(tzinfo), "%c%02d:%02d",
-//                dir, (int) (tim / (60 * 60)), (int) ((tim / 60) % 60));
   }
 
-//  len= my_snprintf(buf, iso8601_size, "%04d%02d%02d%02d%02d%02d",
-//                   my_tm.tm_year + 1900,
-//                   my_tm.tm_mon  + 1,
-//                   my_tm.tm_mday,
-//                   my_tm.tm_hour,
-//                   my_tm.tm_min,
-//                   my_tm.tm_sec);
   utime = seconds*1000000+utime;
   len = my_snprintf(buf,iso8601_size,"%lu",utime);
 
@@ -833,17 +807,15 @@ Binlog_relay_IO_observer bdq_relay_io_observer = {
 
   bdq_io_start,	// start
   bdq_io_end,	// stop
-  bdq_sql_stop,     // stop sql thread
-  bdq_request_dump,	// request_transmit
+  NULL,     // stop sql thread
+  NULL,	// request_transmit
   bdq_read_event,	// after_read_event
-  bdq_queue_event,	// after_queue_event
-  bdq_reset_slave,	// reset
+  NULL,	// after_queue_event
+  NULL,	// reset
 };
 
 static int bdq_plugin_init(void *p)
 {
-//  if (repl_semisync.initObject())
-//    return 1;
   if(register_binlog_relay_io_observer(&bdq_relay_io_observer, p))
   {
     return 1;
